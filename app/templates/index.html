@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>PiWatch 监控中心</title>
+  <link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+  <main class="shell">
+    <header><div><h1>PiWatch</h1><p>树莓派局域网监控中心</p></div><span id="health" class="badge">连接中</span></header>
+    <section class="grid"><article class="card hero"><div class="placeholder">实时预览<br><small>接入摄像头采集管线后显示视频</small></div><div class="actions"><button id="start">开始录像</button><button id="stop" class="secondary">停止录像</button><button id="refresh" class="secondary">刷新状态</button></div></article><article class="card"><h2>设备状态</h2><dl id="status"></dl></article></section>
+    <section class="card"><h2>Web 设置</h2><form id="settings"><div class="form-grid">
+      <label>摄像头类型<select name="source_type"><option value="csi">CSI</option><option value="usb">USB</option></select></label><label>设备路径<input name="device" value="/dev/video0"></label><label>宽度<input name="width" type="number" value="1280"></label><label>高度<input name="height" type="number" value="720"></label><label>帧率<input name="fps" type="number" value="15"></label><label>录像保留天数<input name="retention_days" type="number" min="1" value="7"></label><label>移动侦测<input type="checkbox" name="motion_enabled" checked> 启用</label><label class="wide">异常事件<input name="event_types" value="motion,camera_disconnected,storage_low,temperature_high,yolo_target_detected"></label>
+      <label>YOLO 检测<input type="checkbox" name="yolo_enabled"> 启用目标检测</label><label>YOLO 模型<input name="yolo_model_path" value="yolo11n.pt"></label><label>目标类别<input name="target_classes" value="person"></label><label>置信度<input name="yolo_confidence" type="number" min="0.05" max="1" step="0.05" value="0.5"></label><label>检测采样 FPS<input name="yolo_sample_fps" type="number" min="1" max="10" value="2"></label><label>报警冷却秒数<input name="yolo_cooldown" type="number" min="0" value="300"></label><label>ROI X<input name="roi_x" type="number" min="0" max="1" step="0.01" value="0"></label><label>ROI Y<input name="roi_y" type="number" min="0" max="1" step="0.01" value="0"></label><label>ROI 宽度<input name="roi_width" type="number" min="0.01" max="1" step="0.01" value="1"></label><label>ROI 高度<input name="roi_height" type="number" min="0.01" max="1" step="0.01" value="1"></label>
+      <label>SMTP 主机<input name="smtp_host" placeholder="smtp.example.com"></label><label>SMTP 端口<input name="smtp_port" type="number" value="465"></label><label>安全方式<select name="security"><option value="ssl">SSL</option><option value="starttls">STARTTLS</option><option value="none">无</option></select></label><label>发件账号<input name="username"></label><label>发件密码<input name="password" type="password"></label><label>收件地址<input name="recipient" type="email"></label>
+    </div><div class="actions"><button>保存设置</button><button type="button" id="test-email" class="secondary">发送测试邮件</button><span id="message"></span></div></form></section>
+    <section class="grid"><article class="card"><h2>最近事件</h2><ul id="events"></ul></article><article class="card"><h2>最近录像</h2><ul id="recordings"></ul></article></section>
+  </main><script src="/static/app.js"></script>
+</body>
+</html>

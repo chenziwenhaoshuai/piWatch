@@ -1,0 +1,13 @@
+﻿[Unit]
+Description=PiWatch local security camera
+After=network-online.target
+Wants=network-online.target
+[Service]
+Type=simple
+WorkingDirectory=/opt/piwatch
+ExecStart=/usr/bin/python3 /opt/piwatch/run.py
+Restart=always
+RestartSec=5
+Environment=PIWATCH_PORT=8080
+[Install]
+WantedBy=multi-user.target

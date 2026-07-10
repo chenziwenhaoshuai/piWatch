@@ -1,0 +1,4 @@
+# Core MVP uses the Python standard library.
+# Optional YOLO detection dependencies:
+ultralytics>=8.3,<9
+opencv-python-headless>=4.10,<5
