@@ -3,6 +3,8 @@ from tempfile import TemporaryDirectory
 from app.database import Database
 from app.storage import StorageManager
 from app.yolo_detector import normalize_roi
+from app.camera import CameraManager
+from app.system_monitor import parse_cpu_times, parse_meminfo
 
 def test_settings_and_events():
     with TemporaryDirectory() as tmp:
@@ -18,3 +20,16 @@ def test_normalize_roi_clamps_to_frame():
     x1, y1, x2, y2 = normalize_roi({"x": 2, "y": -1, "width": 2, "height": 2}, 100, 80)
     assert 0 <= x1 < x2 <= 100
     assert 0 <= y1 < y2 <= 80
+
+
+def test_camera_configuration_is_bounded():
+    camera = CameraManager()
+    camera.configure({"source_type": "csi", "device": "csi:0", "width": 9999, "height": 1, "fps": 100})
+    assert (camera.width, camera.height, camera.fps) == (3840, 240, 60)
+
+
+def test_system_monitor_parsers():
+    assert parse_cpu_times("cpu  10 2 3 20 5 1 1 0\n") == (42, 25)
+    memory = parse_meminfo("MemTotal: 1000 kB\nMemAvailable: 250 kB\n")
+    assert memory["used_bytes"] == 750 * 1024
+    assert memory["used_percent"] == 75.0

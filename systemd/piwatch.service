@@ -4,10 +4,20 @@ After=network-online.target
 Wants=network-online.target
 [Service]
 Type=simple
+User=pi
+Group=pi
 WorkingDirectory=/opt/piwatch
-ExecStart=/usr/bin/python3 /opt/piwatch/run.py
+ExecStart=/opt/piwatch-venv/bin/python -u /opt/piwatch/run.py
 Restart=always
 RestartSec=5
 Environment=PIWATCH_PORT=8080
+Environment=PIWATCH_DATA_DIR=/var/lib/piwatch/data
+Environment=PIWATCH_RECORDINGS_DIR=/var/lib/piwatch/recordings
+Environment=PIWATCH_MODELS_DIR=/opt/piwatch/models
+Environment=OMP_NUM_THREADS=4
+Environment=OPENBLAS_NUM_THREADS=4
+Environment=YOLO_CONFIG_DIR=/var/lib/piwatch/models/config
+NoNewPrivileges=true
+PrivateTmp=true
 [Install]
 WantedBy=multi-user.target

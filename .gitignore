@@ -7,6 +7,10 @@ data/*.db
 data/*.log
 data/*
 recordings/
+# Model assets under models/ are intentionally versioned.
 *.pt
+!models/*.pt
 *.onnx
+models/**/__pycache__/
+models/config/
 .env
