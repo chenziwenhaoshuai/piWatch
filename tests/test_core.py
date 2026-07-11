@@ -1,7 +1,8 @@
 ﻿from pathlib import Path
 from tempfile import TemporaryDirectory
 from app.database import Database
-from app.storage import StorageManager
+from app.storage import StorageManager, in_daily_window
+from datetime import datetime
 from app.yolo_detector import normalize_roi
 from app.camera import CameraManager
 from app.system_monitor import parse_cpu_times, parse_meminfo
@@ -33,3 +34,33 @@ def test_system_monitor_parsers():
     memory = parse_meminfo("MemTotal: 1000 kB\nMemAvailable: 250 kB\n")
     assert memory["used_bytes"] == 750 * 1024
     assert memory["used_percent"] == 75.0
+
+
+def test_recording_important_reasons_are_unique():
+    with TemporaryDirectory() as tmp:
+        db = Database(Path(tmp) / "test.db")
+        recording_id = db.create_recording("csi", str(Path(tmp) / "clip.mp4"), False)
+        db.mark_recording_important(recording_id, "motion")
+        db.mark_recording_important(recording_id, "motion")
+        db.mark_recording_important(recording_id, "yolo")
+        recording = db.get_recording(recording_id)
+        assert recording["important"] is True
+        assert recording["important_reasons"] == ["motion", "yolo"]
+
+
+def test_recording_filter_and_delete():
+    with TemporaryDirectory() as tmp:
+        db = Database(Path(tmp) / "test.db")
+        first = db.create_recording("csi", str(Path(tmp) / "first.mp4"), False)
+        second = db.create_recording("csi", str(Path(tmp) / "second.mp4"), False)
+        db.mark_recording_important(second, "yolo")
+        assert [item["id"] for item in db.list_recordings(10, True)] == [second]
+        db.delete_recording(first)
+        assert db.get_recording(first) is None
+
+
+def test_daily_alert_window_supports_midnight():
+    assert in_daily_window(datetime(2026, 1, 1, 23, 0), "22:00", "06:00") is True
+    assert in_daily_window(datetime(2026, 1, 1, 5, 59), "22:00", "06:00") is True
+    assert in_daily_window(datetime(2026, 1, 1, 12, 0), "22:00", "06:00") is False
+    assert in_daily_window(datetime(2026, 1, 1, 9, 0), "08:00", "10:00") is True

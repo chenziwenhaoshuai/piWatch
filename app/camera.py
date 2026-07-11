@@ -109,6 +109,7 @@ class CameraManager:
             return self._latest_frame
 
     def latest_frame(self) -> bytes | None:
+        self._ensure_preview()
         with self._condition:
             return self._latest_frame
 

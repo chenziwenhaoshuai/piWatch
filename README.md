@@ -10,6 +10,15 @@ class filtering, YOLO26n NCNN detection overlays, and device health monitoring.
 - Fixed-input NCNN profiles for 256, 320, 416, 512, and 640 pixels
 - Configurable detection rate from 1 FPS to any integer value, or unlimited
 - Fast detection overlay updates independent from the 3-second system monitor
+- Continuous H.264 recording with one-minute MP4 segments
+- Configurable recording quota with oldest-file cleanup (64 GB by default)
+- Motion detection and YOLO-based important-video marking
+- Optional important-only retention
+- Daily recurring alert schedule with a separate `recordings/alert` area
+- Browser video library with regular, alert, and important filters
+- Range-enabled video playback and safe recording deletion
+- Debounced automatic settings persistence without a save button
+- Collapsible COCO category and recording sections
 - CPU temperature, CPU utilization, memory, load average, uptime, and disk usage
 - Responsive Web UI served directly by the Python application
 
@@ -43,6 +52,7 @@ Requirements:
 - Raspberry Pi OS with `rpicam-vid` or `libcamera-vid`
 - Python 3
 - A CSI camera supported by Raspberry Pi OS
+- FFmpeg with H.264 encoding support
 - `ultralytics`, OpenCV, NCNN, and their runtime dependencies
 
 Install the application under `/opt/piwatch`:
@@ -50,6 +60,7 @@ Install the application under `/opt/piwatch`:
 ```bash
 sudo git clone https://github.com/chenziwenhaoshuai/piWatch.git /opt/piwatch
 sudo chown -R pi:pi /opt/piwatch
+sudo apt-get install -y python3-venv python3-opencv python3-torch python3-torchvision ffmpeg
 python3 -m venv --system-site-packages /opt/piwatch-venv
 /opt/piwatch-venv/bin/pip install -r /opt/piwatch/requirements.txt
 sudo install -d -o pi -g pi /var/lib/piwatch/data /var/lib/piwatch/recordings
@@ -74,6 +85,31 @@ The settings page controls:
 - YOLO inference size
 - YOLO target rate, or unlimited processing
 - COCO target classes, including a person-and-animal preset
+- Continuous recording and segment duration
+- Maximum recording storage in GB
+- Important-only retention
+- Motion pixel threshold, changed-area threshold, and cooldown
+- Daily alert start and end times, including windows that cross midnight
+
+Settings are saved automatically about 600 ms after a control changes. The COCO
+selector and recording library are collapsible to keep the operational view
+compact.
+
+## Recording storage
+
+Completed segments are H.264 MP4 files. Regular recordings are stored below
+`recordings/regular`, while segments that start inside the configured daily alert
+window are stored below `recordings/alert` and marked important automatically.
+
+YOLO detections and motion events also mark the current segment important. When
+important-only retention is enabled, an unimportant segment is deleted as soon as
+it closes. When the configured storage quota is exceeded, PiWatch deletes the
+oldest non-important recordings first; if necessary, it then deletes the oldest
+important recordings so the quota remains enforceable.
+
+The Web recording library provides all, regular, alert, and important views.
+Completed videos support browser seeking through HTTP Range requests and can be
+deleted from the Web UI. An actively written segment cannot be deleted.
 
 Preview resolution and inference resolution are independent. For example, the
 camera can remain at 1280 x 720 while YOLO uses the 320 model.

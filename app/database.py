@@ -39,6 +39,14 @@ class Database:
               protected INTEGER NOT NULL DEFAULT 0, email_sent INTEGER NOT NULL DEFAULT 0,
               details TEXT, created_at TEXT NOT NULL, FOREIGN KEY(recording_id) REFERENCES recordings(id));
             """)
+            columns = {row["name"] for row in conn.execute("PRAGMA table_info(recordings)").fetchall()}
+            if "important" not in columns:
+                conn.execute("ALTER TABLE recordings ADD COLUMN important INTEGER NOT NULL DEFAULT 0")
+            if "important_reasons" not in columns:
+                conn.execute("ALTER TABLE recordings ADD COLUMN important_reasons TEXT NOT NULL DEFAULT '[]'")
+            if "storage_zone" not in columns:
+                conn.execute("ALTER TABLE recordings ADD COLUMN storage_zone TEXT NOT NULL DEFAULT 'regular'")
+            conn.execute("UPDATE recordings SET status='interrupted',ended_at=? WHERE status='recording'", (utc_now(),))
     def set_setting(self, key: str, value: Any) -> None:
         with self.connection() as conn:
             conn.execute("""INSERT INTO settings(key,value,updated_at) VALUES(?,?,?)
@@ -57,25 +65,57 @@ class Database:
             try: result[row["key"]] = json.loads(row["value"])
             except json.JSONDecodeError: result[row["key"]] = row["value"]
         return result
-    def create_recording(self, camera_type: str, file_path: str, audio_enabled: bool) -> int:
+    def create_recording(self, camera_type: str, file_path: str, audio_enabled: bool, storage_zone: str = "regular") -> int:
         with self.connection() as conn:
-            cur = conn.execute("INSERT INTO recordings(camera_type,file_path,started_at,audio_enabled,created_at) VALUES(?,?,?,?,?)",
-                (camera_type, file_path, utc_now(), int(audio_enabled), utc_now()))
+            cur = conn.execute("INSERT INTO recordings(camera_type,file_path,started_at,audio_enabled,storage_zone,created_at) VALUES(?,?,?,?,?,?)",
+                (camera_type, file_path, utc_now(), int(audio_enabled), storage_zone, utc_now()))
             return int(cur.lastrowid)
     def finish_recording(self, recording_id: int, status: str, duration: float, size: int) -> None:
         with self.connection() as conn:
             conn.execute("UPDATE recordings SET ended_at=?,status=?,duration_seconds=?,size_bytes=? WHERE id=?",
                 (utc_now(), status, duration, size, recording_id))
+    def get_recording(self, recording_id: int) -> dict[str, Any] | None:
+        with self.connection() as conn:
+            row = conn.execute("SELECT * FROM recordings WHERE id=?", (recording_id,)).fetchone()
+        return self._recording_dict(row) if row else None
+    def mark_recording_important(self, recording_id: int, reason: str) -> None:
+        with self.connection() as conn:
+            row = conn.execute("SELECT important_reasons FROM recordings WHERE id=?", (recording_id,)).fetchone()
+            if not row:
+                return
+            try: reasons = json.loads(row["important_reasons"] or "[]")
+            except json.JSONDecodeError: reasons = []
+            if reason not in reasons: reasons.append(reason)
+            conn.execute("UPDATE recordings SET important=1,protected=1,important_reasons=? WHERE id=?",
+                (json.dumps(reasons, ensure_ascii=False), recording_id))
+    def delete_recording(self, recording_id: int) -> None:
+        with self.connection() as conn:
+            conn.execute("DELETE FROM events WHERE recording_id=?", (recording_id,))
+            conn.execute("DELETE FROM recordings WHERE id=?", (recording_id,))
     def create_event(self, event_type: str, recording_id: int | None, details: dict[str, Any] | None = None) -> int:
         with self.connection() as conn:
             cur = conn.execute("INSERT INTO events(type,started_at,recording_id,details,created_at) VALUES(?,?,?,?,?)",
                 (event_type, utc_now(), recording_id, json.dumps(details or {}, ensure_ascii=False), utc_now()))
             return int(cur.lastrowid)
-    def list_recordings(self, limit: int = 50) -> list[dict[str, Any]]:
-        with self.connection() as conn: rows = conn.execute("SELECT * FROM recordings ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
-        return [dict(row) for row in rows]
+    def list_recordings(self, limit: int = 50, important_only: bool = False) -> list[dict[str, Any]]:
+        query = "SELECT * FROM recordings"
+        values: list[Any] = []
+        if important_only:
+            query += " WHERE important=1"
+        query += " ORDER BY id DESC LIMIT ?"
+        values.append(limit)
+        with self.connection() as conn: rows = conn.execute(query, values).fetchall()
+        return [self._recording_dict(row) for row in rows]
     def list_events(self, limit: int = 50) -> list[dict[str, Any]]:
         with self.connection() as conn: rows = conn.execute("SELECT * FROM events ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
         return [dict(row) for row in rows]
     def set_event_protected(self, event_id: int, protected: bool) -> None:
         with self.connection() as conn: conn.execute("UPDATE events SET protected=? WHERE id=?", (int(protected), event_id))
+    @staticmethod
+    def _recording_dict(row: sqlite3.Row) -> dict[str, Any]:
+        result = dict(row)
+        try: result["important_reasons"] = json.loads(result.get("important_reasons") or "[]")
+        except json.JSONDecodeError: result["important_reasons"] = []
+        result["important"] = bool(result.get("important"))
+        result["protected"] = bool(result.get("protected"))
+        return result

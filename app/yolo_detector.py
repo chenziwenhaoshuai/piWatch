@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import threading
 import time
+import importlib.util
+import traceback
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
@@ -25,12 +27,7 @@ class YoloDetector:
 
     @property
     def available(self) -> bool:
-        try:
-            import ultralytics  # noqa: F401
-            import cv2  # noqa: F401
-            return True
-        except ImportError:
-            return False
+        return importlib.util.find_spec("ultralytics") is not None and importlib.util.find_spec("cv2") is not None
 
     def load(self) -> None:
         if self.model is not None:
@@ -221,6 +218,6 @@ class DetectionWorker:
                     target_period = 1 / sample_fps
                     time.sleep(max(0.001, target_period - inference_seconds))
         except Exception as exc:
-            self.last_error = str(exc)
+            self.last_error = traceback.format_exc(limit=8)
         finally:
             return

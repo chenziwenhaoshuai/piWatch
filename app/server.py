@@ -6,10 +6,10 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 from .camera import CameraManager
-from .config import STATIC_DIR, TEMPLATES_DIR
+from .config import RECORDINGS_DIR, STATIC_DIR, TEMPLATES_DIR
 from .database import Database
 from .notifications import EmailNotifier
 from .storage import RecordingManager, StorageManager
@@ -20,7 +20,8 @@ DEFAULTS: dict[str, Any] = {
     "camera": {"source_type": "csi", "device": "csi:0", "width": 1280, "height": 720, "fps": 15, "bitrate": 2500000},
     "audio": {"enabled": False},
     "storage": {"retention_days": 7, "max_used_percent": 70},
-    "motion": {"enabled": True, "sensitivity": "medium", "cooldown_seconds": 300, "event_types": ["motion", "camera_disconnected", "storage_low", "temperature_high"]},
+    "recording": {"enabled": True, "segment_seconds": 60, "max_storage_gb": 64, "important_only": False, "alert_schedule_enabled": False, "alert_start": "22:00", "alert_end": "06:00"},
+    "motion": {"enabled": True, "analysis_width": 320, "pixel_threshold": 25, "trigger_percent": 8, "cooldown_seconds": 5, "event_types": ["motion", "camera_disconnected", "storage_low", "temperature_high"]},
     "yolo": {"enabled": True, "model_path": "/var/lib/piwatch/models/yolo26n_ncnn_model", "confidence": 0.4, "imgsz": 416, "sample_fps": 2, "alert_cooldown_seconds": 300, "target_classes": ["person", "bird", "cat", "dog", "horse", "sheep", "cow", "elephant", "bear", "zebra", "giraffe"], "roi": {"x": 0, "y": 0, "width": 1, "height": 1}},
     "notifications": {"enabled": False, "smtp_host": "", "smtp_port": 465, "security": "ssl", "sender": "", "username": "", "password": "", "recipient": "", "subject_prefix": "[PiWatch]"},
 }
@@ -45,15 +46,41 @@ class AppState:
     def __init__(self):
         self.db = Database()
         merge_defaults(self.db)
+        self._preload_native_runtime()
+        self._preload_yolo_runtime()
         self.camera = CameraManager()
         self.storage = StorageManager(self.db)
         self.system = SystemMonitor()
-        self.recorder = RecordingManager(self.storage)
         camera = self.db.get_setting("camera")
         self.camera.configure(camera)
+        self.recorder = RecordingManager(
+            self.storage,
+            self.settings,
+            self.camera.latest_frame,
+            self.camera.status,
+            self._on_motion,
+        )
         self.detector = DetectionWorker(self._detection_settings, self._on_detection, self.camera.latest_frame)
+        if self.db.get_setting("recording", {}).get("enabled"):
+            self.recorder.start()
         if self.db.get_setting("yolo", {}).get("enabled"):
             self.detector.start()
+
+    @staticmethod
+    def _preload_native_runtime() -> None:
+        try:
+            import cv2  # noqa: F401
+            import numpy  # noqa: F401
+        except ImportError:
+            pass
+
+    def _preload_yolo_runtime(self) -> None:
+        if not self.db.get_setting("yolo", {}).get("enabled"):
+            return
+        try:
+            import ultralytics  # noqa: F401
+        except ImportError:
+            pass
 
     def settings(self) -> dict[str, Any]:
         return self.db.get_settings()
@@ -75,11 +102,30 @@ class AppState:
                 if sample_fps < 0:
                     raise ValueError("yolo_sample_fps_must_be_zero_or_positive")
                 value["sample_fps"] = sample_fps
+            if key == "recording":
+                if "segment_seconds" in value:
+                    value["segment_seconds"] = max(10, int(value["segment_seconds"]))
+                if "max_storage_gb" in value:
+                    value["max_storage_gb"] = max(0.1, float(value["max_storage_gb"]))
+                for field in ("alert_start", "alert_end"):
+                    if field in value:
+                        value[field] = validate_time(value[field])
+            if key == "motion":
+                if "pixel_threshold" in value:
+                    value["pixel_threshold"] = max(1, int(value["pixel_threshold"]))
+                if "trigger_percent" in value:
+                    value["trigger_percent"] = max(0.1, min(100, float(value["trigger_percent"])))
+                if "cooldown_seconds" in value:
+                    value["cooldown_seconds"] = max(0, float(value["cooldown_seconds"]))
             current = self.db.get_setting(key, {})
             current.update(value)
             self.db.set_setting(key, current)
         camera = self.db.get_setting("camera")
         self.camera.configure(camera)
+        if self.db.get_setting("recording", {}).get("enabled"):
+            self.recorder.start()
+        else:
+            self.recorder.stop()
         if self.db.get_setting("yolo", {}).get("enabled"):
             self.detector.start()
         else:
@@ -92,7 +138,7 @@ class AppState:
             "audio": self.db.get_setting("audio"),
             "storage": self.storage.disk_status(),
             "system": self.system.snapshot(),
-            "recording_active": self.recorder.active,
+            "recording": self.recorder.status(),
             "yolo": self.detector.status(),
         }
 
@@ -112,7 +158,8 @@ class AppState:
 
     def _on_detection(self, detections: list[Detection]) -> None:
         details = {"detections": [d.__dict__ for d in detections], "roi": self.db.get_setting("yolo", {}).get("roi")}
-        event_id = self.db.create_event("yolo_target_detected", None, details)
+        recording_id = self.recorder.mark_important("yolo")
+        event_id = self.db.create_event("yolo_target_detected", recording_id, details)
         motion = self.db.get_setting("motion", {})
         notification = self.db.get_setting("notifications", {})
         if "yolo_target_detected" not in motion.get("event_types", []) or not notification.get("enabled"):
@@ -127,6 +174,10 @@ class AppState:
             # Detection remains visible in the event log if SMTP is unavailable.
             pass
 
+    def _on_motion(self, score: float) -> None:
+        recording_id = self.recorder.mark_important("motion")
+        self.db.create_event("motion", recording_id, {"score_percent": score})
+
 
 STATE = AppState()
 
@@ -135,7 +186,8 @@ class Handler(BaseHTTPRequestHandler):
     server_version = "PiWatch/0.1"
 
     def do_GET(self):
-        path = urlparse(self.path).path
+        parsed = urlparse(self.path)
+        path = parsed.path
         if path == "/":
             return self.file(TEMPLATES_DIR / "index.html", "text/html; charset=utf-8")
         if path.startswith("/static/"):
@@ -151,13 +203,23 @@ class Handler(BaseHTTPRequestHandler):
                 return self.raw(STATE.camera.snapshot(), "image/jpeg")
             except RuntimeError as exc:
                 return self.json({"error": {"code": "CAMERA_UNAVAILABLE", "message": str(exc)}}, HTTPStatus.SERVICE_UNAVAILABLE)
+        if path.startswith("/api/v1/recordings/") and path.endswith("/video"):
+            try:
+                recording_id = int(path.split("/")[-2])
+                return self.video(recording_id)
+            except (ValueError, OSError) as exc:
+                return self.json({"error": {"code": "VIDEO_UNAVAILABLE", "message": str(exc)}}, HTTPStatus.NOT_FOUND)
+        query = parse_qs(parsed.query)
         routes = {
             "/api/v1/health": lambda: {"ok": True},
             "/api/v1/status": STATE.status,
             "/api/v1/detections": STATE.detector.detection_status,
             "/api/v1/settings": STATE.settings,
             "/api/v1/cameras": lambda: {"items": STATE.camera.list_devices()},
-            "/api/v1/recordings": lambda: {"items": STATE.db.list_recordings()},
+            "/api/v1/recordings": lambda: {"items": filter_recordings(
+                STATE.db.list_recordings(200, query.get("important", ["0"])[0] == "1"),
+                query.get("zone", [""])[0],
+            )},
             "/api/v1/events": lambda: {"items": STATE.db.list_events()},
         }
         if path in routes:
@@ -175,11 +237,6 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         path = urlparse(self.path).path
         try:
-            if path == "/api/v1/recordings/start":
-                settings = STATE.settings()
-                return self.json(STATE.recorder.start(settings["camera"]["source_type"], settings["audio"].get("enabled", False)), HTTPStatus.CREATED)
-            if path == "/api/v1/recordings/stop":
-                return self.json(STATE.recorder.stop())
             if path == "/api/v1/notifications/test-email":
                 EmailNotifier(STATE.settings()["notifications"]).send("PiWatch 测试邮件", "PiWatch SMTP 配置测试成功。")
                 return self.json({"ok": True})
@@ -204,6 +261,28 @@ class Handler(BaseHTTPRequestHandler):
                 return self.json({"ok": True})
             except Exception as exc:
                 return self.json({"error": {"code": "INVALID_EVENT", "message": str(exc)}}, HTTPStatus.BAD_REQUEST)
+        return self.json({"error": {"code": "NOT_FOUND", "message": "资源不存在"}}, HTTPStatus.NOT_FOUND)
+
+    def do_DELETE(self):
+        path = urlparse(self.path).path
+        if path.startswith("/api/v1/recordings/"):
+            try:
+                recording_id = int(path.rsplit("/", 1)[1])
+                row = STATE.db.get_recording(recording_id)
+                if not row:
+                    raise ValueError("recording_not_found")
+                if row["status"] == "recording" or recording_id == STATE.recorder.current_recording_id:
+                    raise ValueError("recording_is_active")
+                file_path = Path(row["file_path"]).resolve()
+                root = RECORDINGS_DIR.resolve()
+                if file_path != root and root not in file_path.parents:
+                    raise ValueError("recording_path_outside_storage")
+                if file_path.exists():
+                    file_path.unlink()
+                STATE.db.delete_recording(recording_id)
+                return self.json({"ok": True})
+            except Exception as exc:
+                return self.json({"error": {"code": "DELETE_FAILED", "message": str(exc)}}, HTTPStatus.BAD_REQUEST)
         return self.json({"error": {"code": "NOT_FOUND", "message": "资源不存在"}}, HTTPStatus.NOT_FOUND)
 
     def body(self) -> dict[str, Any]:
@@ -239,6 +318,45 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(payload)
 
+    def video(self, recording_id: int):
+        row = STATE.db.get_recording(recording_id)
+        if not row:
+            raise ValueError("recording_not_found")
+        path = Path(row["file_path"])
+        if not path.exists() or path.suffix.lower() != ".mp4":
+            raise ValueError("recording_file_not_found")
+        size = path.stat().st_size
+        start, end = 0, max(0, size - 1)
+        range_header = self.headers.get("Range")
+        status = HTTPStatus.OK
+        if range_header and range_header.startswith("bytes="):
+            values = range_header[6:].split("-", 1)
+            if values[0]: start = max(0, int(values[0]))
+            if len(values) > 1 and values[1]: end = min(end, int(values[1]))
+            if start > end or start >= size:
+                self.send_response(HTTPStatus.REQUESTED_RANGE_NOT_SATISFIABLE)
+                self.send_header("Content-Range", f"bytes */{size}")
+                self.end_headers()
+                return
+            status = HTTPStatus.PARTIAL_CONTENT
+        length = end - start + 1
+        self.send_response(status)
+        self.send_header("Content-Type", "video/mp4")
+        self.send_header("Content-Length", str(length))
+        self.send_header("Accept-Ranges", "bytes")
+        self.send_header("Cache-Control", "private, max-age=60")
+        if status == HTTPStatus.PARTIAL_CONTENT:
+            self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
+        self.end_headers()
+        with path.open("rb") as handle:
+            handle.seek(start)
+            remaining = length
+            while remaining:
+                chunk = handle.read(min(1024 * 1024, remaining))
+                if not chunk: break
+                self.wfile.write(chunk)
+                remaining -= len(chunk)
+
     def stream(self):
         self.send_response(HTTPStatus.OK)
         self.send_header("Content-Type", "multipart/x-mixed-replace; boundary=frame")
@@ -257,6 +375,23 @@ class Handler(BaseHTTPRequestHandler):
 
     def log_message(self, *args):
         return
+
+
+def validate_time(value: Any) -> str:
+    text = str(value)
+    parts = text.split(":")
+    if len(parts) != 2:
+        raise ValueError("time_must_be_hh_mm")
+    hour, minute = int(parts[0]), int(parts[1])
+    if not (0 <= hour <= 23 and 0 <= minute <= 59):
+        raise ValueError("time_must_be_hh_mm")
+    return f"{hour:02d}:{minute:02d}"
+
+
+def filter_recordings(items: list[dict[str, Any]], zone: str) -> list[dict[str, Any]]:
+    if zone not in {"regular", "alert"}:
+        return items
+    return [item for item in items if item.get("storage_zone", "regular") == zone]
 
 
 def run(host: str = "0.0.0.0", port: int | None = None):

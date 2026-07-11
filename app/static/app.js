@@ -5,6 +5,10 @@ const detectionCanvas = $('#detection-overlay');
 const detectionContext = detectionCanvas.getContext('2d');
 let settingsLoaded = false;
 let lastDetectionUpdate = null;
+let recordingFilter = 'all';
+let saveTimer = null;
+let saveInProgress = false;
+let saveQueued = false;
 
 const COCO_GROUPS = [
   ['人员', [['person', '人']]],
@@ -39,6 +43,16 @@ function formatBytes(bytes) {
   return `${gib.toFixed(gib >= 10 ? 1 : 2)} GB`;
 }
 
+function formatDuration(seconds) {
+  const value = Math.max(0, Math.round(Number(seconds) || 0));
+  return `${Math.floor(value / 60)}:${String(value % 60).padStart(2, '0')}`;
+}
+
+function formatDate(value) {
+  if (!value) return '--';
+  return new Date(value).toLocaleString('zh-CN', { hour12: false });
+}
+
 function formatUptime(seconds) {
   const days = Math.floor(seconds / 86400);
   const hours = Math.floor((seconds % 86400) / 3600);
@@ -64,6 +78,9 @@ function renderStatus(data) {
     ['画面', camera.streaming ? '正在传输' : '等待访问'],
     ['规格', `${camera.width || '-'} × ${camera.height || '-'} · ${camera.fps || '-'} FPS`],
     ['存储占用', `${storage.used_percent ?? '-'}%`],
+    ['录像空间', `${formatBytes(storage.recording_bytes)} / ${data.recording?.max_storage_gb ?? '-'} GB`],
+    ['持续录像', data.recording?.active ? `切片 #${data.recording.recording_id || '-'}` : data.recording?.enabled ? '启动中' : '已关闭'],
+    ['移动检测', data.recording?.last_motion_at ? `${data.recording.motion_score}%` : '等待变化'],
   ];
   $('#status').innerHTML = rows.map(([key, value]) => `<dt>${key}</dt><dd>${value}</dd>`).join('');
   const health = $('#health');
@@ -161,16 +178,30 @@ function updateSelectedCount() {
 function fill(settings) {
   const camera = settings.camera || {};
   const yolo = settings.yolo || {};
+  const recording = settings.recording || {};
+  const motion = settings.motion || {};
   form.elements.source_type.value = camera.source_type || 'csi';
   form.elements.device.value = camera.device || 'csi:0';
   const resolution = `${camera.width || 1280}x${camera.height || 720}`;
   if ([...form.elements.resolution.options].some((option) => option.value === resolution)) form.elements.resolution.value = resolution;
   form.elements.fps.value = camera.fps || 15;
   form.elements.yolo_imgsz.value = String(yolo.imgsz || 416);
+  form.elements.yolo_enabled.checked = yolo.enabled !== false;
   const unlimited = Number(yolo.sample_fps) === 0;
   form.elements.yolo_unlimited.checked = unlimited;
   form.elements.yolo_sample_fps.disabled = unlimited;
   form.elements.yolo_sample_fps.value = String(unlimited ? 2 : Math.max(1, Number(yolo.sample_fps) || 2));
+  form.elements.recording_enabled.checked = recording.enabled !== false;
+  form.elements.segment_seconds.value = recording.segment_seconds || 60;
+  form.elements.max_storage_gb.value = recording.max_storage_gb || 64;
+  form.elements.important_only.checked = !!recording.important_only;
+  form.elements.alert_schedule_enabled.checked = !!recording.alert_schedule_enabled;
+  form.elements.alert_start.value = recording.alert_start || '22:00';
+  form.elements.alert_end.value = recording.alert_end || '06:00';
+  form.elements.motion_enabled.checked = motion.enabled !== false;
+  form.elements.motion_pixel_threshold.value = motion.pixel_threshold || 25;
+  form.elements.motion_trigger_percent.value = motion.trigger_percent || 8;
+  form.elements.motion_cooldown_seconds.value = motion.cooldown_seconds ?? 5;
   setSelectedClasses(yolo.target_classes || []);
   settingsLoaded = true;
 }
@@ -195,12 +226,16 @@ function reconnectStream() {
 liveView.onload = () => { $('#stream-error').hidden = true; };
 liveView.onerror = () => { $('#stream-error').hidden = false; };
 
-form.onsubmit = async (event) => {
-  event.preventDefault();
+async function saveSettings() {
   if (!settingsLoaded) {
-    message('设置仍在加载，请稍候', true);
     return;
   }
+  if (saveInProgress) {
+    saveQueued = true;
+    return;
+  }
+  saveInProgress = true;
+  message('保存中');
   const fields = new FormData(form);
   const [width, height] = String(fields.get('resolution')).split('x').map(Number);
   try {
@@ -209,27 +244,56 @@ form.onsubmit = async (event) => {
       body: JSON.stringify({
         camera: { source_type: fields.get('source_type'), device: fields.get('device'), width, height, fps: Number(fields.get('fps')) },
         yolo: {
+          enabled: form.elements.yolo_enabled.checked,
           target_classes: selectedClasses(),
           imgsz: Number(fields.get('yolo_imgsz')),
           sample_fps: form.elements.yolo_unlimited.checked ? 0 : Math.max(1, Number(fields.get('yolo_sample_fps')) || 1),
         },
+        recording: {
+          enabled: form.elements.recording_enabled.checked,
+          segment_seconds: Math.max(10, Number(fields.get('segment_seconds')) || 60),
+          max_storage_gb: Math.max(0.1, Number(fields.get('max_storage_gb')) || 64),
+          important_only: form.elements.important_only.checked,
+          alert_schedule_enabled: form.elements.alert_schedule_enabled.checked,
+          alert_start: fields.get('alert_start'),
+          alert_end: fields.get('alert_end'),
+        },
+        motion: {
+          enabled: form.elements.motion_enabled.checked,
+          pixel_threshold: Math.max(1, Number(fields.get('motion_pixel_threshold')) || 25),
+          trigger_percent: Math.max(0.1, Number(fields.get('motion_trigger_percent')) || 8),
+          cooldown_seconds: Math.max(0, Number(fields.get('motion_cooldown_seconds')) || 0),
+        },
       }),
     });
-    message('设置已保存');
-    reconnectStream();
-    await refresh();
+    message('已自动保存');
   } catch (error) {
     message(error.message, true);
+  } finally {
+    saveInProgress = false;
+    if (saveQueued) {
+      saveQueued = false;
+      saveSettings();
+    }
   }
-};
+}
+
+function scheduleSave() {
+  if (!settingsLoaded) return;
+  window.clearTimeout(saveTimer);
+  message('等待保存');
+  saveTimer = window.setTimeout(saveSettings, 600);
+}
 
 $('#refresh').onclick = refresh;
-$('#select-common').onclick = () => setSelectedClasses(COMMON_CLASSES);
-$('#select-all').onclick = () => setSelectedClasses(COCO_GROUPS.flatMap(([, classes]) => classes.map(([value]) => value)));
-$('#clear-all').onclick = () => setSelectedClasses([]);
+$('#select-common').onclick = () => { setSelectedClasses(COMMON_CLASSES); scheduleSave(); };
+$('#select-all').onclick = () => { setSelectedClasses(COCO_GROUPS.flatMap(([, classes]) => classes.map(([value]) => value))); scheduleSave(); };
+$('#clear-all').onclick = () => { setSelectedClasses([]); scheduleSave(); };
 form.elements.yolo_unlimited.onchange = () => {
   form.elements.yolo_sample_fps.disabled = form.elements.yolo_unlimited.checked;
 };
+form.addEventListener('input', scheduleSave);
+form.addEventListener('change', scheduleSave);
 window.addEventListener('resize', () => detectionContext.clearRect(0, 0, detectionCanvas.width, detectionCanvas.height));
 
 buildClassSelector();
@@ -251,3 +315,52 @@ async function pollDetections() {
 }
 
 pollDetections();
+
+async function refreshRecordings() {
+  try {
+    const query = recordingFilter === 'important' ? '?important=1' : recordingFilter === 'regular' || recordingFilter === 'alert' ? `?zone=${recordingFilter}` : '';
+    const data = await api(`/api/v1/recordings${query}`);
+    const items = data.items || [];
+    const filterNames = { all: '全部', regular: '普通区', alert: '警戒区', important: '重点' };
+    $('#recording-summary').textContent = `${filterNames[recordingFilter]} · ${items.length} 个切片`;
+    $('#recording-list').innerHTML = items.length ? items.map((item) => {
+      const reasons = (item.important_reasons || []).map((reason) => reason === 'yolo' ? 'YOLO 目标' : reason === 'motion' ? '移动检测' : reason === 'alert_schedule' ? '警戒时段' : reason);
+      const zone = item.storage_zone === 'alert' ? '警戒区' : '普通区';
+      return `<article class="recording-item">
+        <video controls preload="metadata" src="/api/v1/recordings/${item.id}/video"></video>
+        <div class="recording-meta">
+          <div class="recording-title"><strong>${formatDate(item.started_at)}</strong>${item.important ? '<span class="important-badge">重点</span>' : ''}</div>
+          <p>${zone} · ${formatDuration(item.duration_seconds)} · ${formatBytes(item.size_bytes)} · ${item.status === 'recording' ? '录制中' : '已完成'}</p>
+          ${reasons.length ? `<div class="reason-list">${reasons.map((reason) => `<span>${reason}</span>`).join('')}</div>` : ''}
+          ${item.status === 'recording' ? '' : `<button type="button" class="delete-recording" data-recording-id="${item.id}">删除视频</button>`}
+        </div>
+      </article>`;
+    }).join('') : '<div class="empty-state">暂无录像</div>';
+  } catch (error) {
+    $('#recording-list').innerHTML = `<div class="empty-state error-text">${error.message}</div>`;
+  }
+}
+
+document.querySelectorAll('[data-recording-filter]').forEach((button) => {
+  button.onclick = () => {
+    recordingFilter = button.dataset.recordingFilter;
+    document.querySelectorAll('[data-recording-filter]').forEach((item) => item.classList.toggle('active', item === button));
+    refreshRecordings();
+  };
+});
+
+refreshRecordings();
+setInterval(refreshRecordings, 15000);
+
+$('#recording-list').onclick = async (event) => {
+  const button = event.target.closest('[data-recording-id]');
+  if (!button || !window.confirm('确定删除这个视频？此操作无法撤销。')) return;
+  button.disabled = true;
+  try {
+    await api(`/api/v1/recordings/${button.dataset.recordingId}`, { method: 'DELETE' });
+    await refreshRecordings();
+  } catch (error) {
+    button.disabled = false;
+    message(error.message, true);
+  }
+};

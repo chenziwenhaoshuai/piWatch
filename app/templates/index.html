@@ -81,10 +81,32 @@
             <input name="yolo_unlimited" type="checkbox">
             <span>不限制推理帧率</span>
           </label>
+          <label class="toggle-field">
+            <input name="yolo_enabled" type="checkbox" checked>
+            <span>启用 YOLO 检测</span>
+          </label>
         </div>
 
         <div class="class-section">
-          <div class="class-heading">
+          <div class="class-heading"><div><h2>录像与移动检测</h2><p>录像按固定时长切片，超过容量后自动删除最老视频。</p></div></div>
+          <div class="form-grid">
+            <label class="toggle-field"><input name="recording_enabled" type="checkbox" checked><span>持续录像</span></label>
+            <label>切片时长（秒）<input name="segment_seconds" type="number" min="10" step="1" value="60"></label>
+            <label>最大录像容量（GB）<input name="max_storage_gb" type="number" min="0.1" step="0.1" value="64"></label>
+            <label class="toggle-field"><input name="important_only" type="checkbox"><span>只保留重点视频</span></label>
+            <label class="toggle-field"><input name="alert_schedule_enabled" type="checkbox"><span>启用每日警戒时间</span></label>
+            <label>警戒开始<input name="alert_start" type="time" value="22:00"></label>
+            <label>警戒结束<input name="alert_end" type="time" value="06:00"></label>
+            <label class="toggle-field"><input name="motion_enabled" type="checkbox" checked><span>移动检测</span></label>
+            <label>像素变化阈值<input name="motion_pixel_threshold" type="number" min="1" max="255" step="1" value="25"></label>
+            <label>触发变化面积（%）<input name="motion_trigger_percent" type="number" min="0.1" max="100" step="0.1" value="8"></label>
+            <label>移动事件冷却（秒）<input name="motion_cooldown_seconds" type="number" min="0" step="0.5" value="5"></label>
+          </div>
+        </div>
+
+        <details class="class-section collapsible-section">
+          <summary><span>COCO 检测类别</span><small><strong id="selected-count">0</strong> / 80 类已选择</small></summary>
+          <div class="class-heading collapsible-content">
             <div><h2>COCO 检测类别</h2><p>勾选需要检测并绘制目标框的类别。</p></div>
             <div class="compact-actions">
               <button type="button" class="secondary-button" id="select-common">人员与动物</button>
@@ -93,10 +115,9 @@
             </div>
           </div>
           <div id="class-groups" class="class-groups"></div>
-          <div class="selection-summary"><strong id="selected-count">0</strong> / 80 类已选择</div>
-        </div>
+        </details>
 
-        <div class="actions"><button type="submit">保存设置</button><span id="message"></span></div>
+        <div class="actions"><span id="message">修改后自动保存</span></div>
       </form>
     </section>
 
@@ -104,6 +125,22 @@
       <div><h2>目标检测</h2><p id="yolo-detail">YOLO26n + NCNN 正在加载</p></div>
       <span id="yolo-badge" class="badge neutral">加载中</span>
     </section>
+
+    <details class="panel recordings-panel" open>
+      <summary class="recording-summary-title"><span>录像</span><small id="recording-summary">正在加载录像列表</small></summary>
+      <div class="recordings-content">
+      <div class="panel-heading">
+        <div><h2>录像库</h2><p>普通录像与警戒录像分目录保存</p></div>
+        <div class="view-tabs" role="tablist" aria-label="录像筛选">
+          <button type="button" class="active" data-recording-filter="all">全部视频</button>
+          <button type="button" data-recording-filter="regular">普通区</button>
+          <button type="button" data-recording-filter="alert">警戒区</button>
+          <button type="button" data-recording-filter="important">重点视频</button>
+        </div>
+      </div>
+      <div id="recording-list" class="recording-list"></div>
+      </div>
+    </details>
   </main>
   <script src="/static/app.js"></script>
 </body>
