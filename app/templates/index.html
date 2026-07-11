@@ -117,6 +117,25 @@
           <div id="class-groups" class="class-groups"></div>
         </details>
 
+        <details class="class-section collapsible-section">
+          <summary><span>SMTP 邮件通知</span><small>重点事件截图报警</small></summary>
+          <div class="class-heading collapsible-content">
+            <div><h2>SMTP 邮件通知</h2><p>YOLO 目标和移动检测触发时发送事件内容及当前截图。</p></div>
+          </div>
+          <div class="form-grid">
+            <label class="toggle-field"><input name="notification_enabled" type="checkbox"><span>启用邮件通知</span></label>
+            <label>SMTP 服务器<input name="smtp_host" placeholder="smtp.example.com" autocomplete="off"></label>
+            <label>SMTP 端口<input name="smtp_port" type="number" min="1" max="65535" value="465"></label>
+            <label>连接加密<select name="smtp_security"><option value="ssl">SSL/TLS</option><option value="starttls">STARTTLS</option><option value="none">无加密</option></select></label>
+            <label>发件邮箱<input name="smtp_sender" type="email" placeholder="camera@example.com" autocomplete="email"></label>
+            <label>SMTP 用户名<input name="smtp_username" autocomplete="username"></label>
+            <label>SMTP 密码/授权码<input name="smtp_password" type="password" autocomplete="current-password"></label>
+            <label>收件邮箱<input name="smtp_recipient" type="email" placeholder="owner@example.com" autocomplete="email"></label>
+            <label>邮件主题前缀<input name="smtp_subject_prefix" value="[PiWatch]"></label>
+          </div>
+          <div class="actions"><button type="button" class="secondary-button" id="test-email">发送测试邮件</button><span id="email-message" class="muted"></span></div>
+        </details>
+
         <div class="actions"><span id="message">修改后自动保存</span></div>
       </form>
     </section>

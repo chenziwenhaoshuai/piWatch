@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import os
+import threading
+from datetime import datetime
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -117,6 +119,11 @@ class AppState:
                     value["trigger_percent"] = max(0.1, min(100, float(value["trigger_percent"])))
                 if "cooldown_seconds" in value:
                     value["cooldown_seconds"] = max(0, float(value["cooldown_seconds"]))
+            if key == "notifications":
+                if "smtp_port" in value:
+                    value["smtp_port"] = max(1, min(65535, int(value["smtp_port"])))
+                if "security" in value and value["security"] not in ("ssl", "starttls", "none"):
+                    raise ValueError("smtp_security_must_be_ssl_starttls_or_none")
             current = self.db.get_setting(key, {})
             current.update(value)
             self.db.set_setting(key, current)
@@ -160,23 +167,39 @@ class AppState:
         details = {"detections": [d.__dict__ for d in detections], "roi": self.db.get_setting("yolo", {}).get("roi")}
         recording_id = self.recorder.mark_important("yolo")
         event_id = self.db.create_event("yolo_target_detected", recording_id, details)
-        motion = self.db.get_setting("motion", {})
-        notification = self.db.get_setting("notifications", {})
-        if "yolo_target_detected" not in motion.get("event_types", []) or not notification.get("enabled"):
-            return
         labels = ", ".join(f"{d.label} ({d.confidence:.2f})" for d in detections)
-        try:
-            EmailNotifier(notification).send(
-                f"{notification.get('subject_prefix', '[PiWatch]')} YOLO 目标报警",
-                f"检测到目标：{labels}\n事件 ID：{event_id}\nROI：{details['roi']}",
-            )
-        except Exception:
-            # Detection remains visible in the event log if SMTP is unavailable.
-            pass
+        self._notify_important_event(
+            "YOLO 目标报警",
+            f"检测到目标：{labels}\n事件 ID：{event_id}\n录像 ID：{recording_id or '无'}\nROI：{details['roi']}",
+            event_id,
+        )
 
     def _on_motion(self, score: float) -> None:
         recording_id = self.recorder.mark_important("motion")
-        self.db.create_event("motion", recording_id, {"score_percent": score})
+        event_id = self.db.create_event("motion", recording_id, {"score_percent": score})
+        self._notify_important_event(
+            "移动检测报警",
+            f"画面变化面积：{score:.2f}%\n事件 ID：{event_id}\n录像 ID：{recording_id or '无'}",
+            event_id,
+        )
+
+    def _notify_important_event(self, title: str, body: str, event_id: int) -> None:
+        notification = self.db.get_setting("notifications", {})
+        if not notification.get("enabled"):
+            return
+        frame = self.camera.latest_frame()
+        timestamp = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S %z")
+        subject = f"{notification.get('subject_prefix', '[PiWatch]')} {title}"
+        message = f"{body}\n时间：{timestamp}\n主机：security-camera"
+
+        def send() -> None:
+            try:
+                EmailNotifier(notification).send(subject, message, frame, f"event-{event_id}.jpg")
+            except Exception:
+                # Recording and event handling must continue if SMTP is unavailable.
+                pass
+
+        threading.Thread(target=send, name=f"email-event-{event_id}", daemon=True).start()
 
 
 STATE = AppState()
@@ -238,7 +261,13 @@ class Handler(BaseHTTPRequestHandler):
         path = urlparse(self.path).path
         try:
             if path == "/api/v1/notifications/test-email":
-                EmailNotifier(STATE.settings()["notifications"]).send("PiWatch 测试邮件", "PiWatch SMTP 配置测试成功。")
+                notification = STATE.settings()["notifications"]
+                EmailNotifier(notification).send(
+                    f"{notification.get('subject_prefix', '[PiWatch]')} 测试邮件",
+                    "PiWatch SMTP 配置测试成功，附件为发送测试时的摄像头画面。",
+                    STATE.camera.latest_frame(),
+                    "piwatch-test.jpg",
+                )
                 return self.json({"ok": True})
             if path == "/api/v1/events":
                 payload = self.body()

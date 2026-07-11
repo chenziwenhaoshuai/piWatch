@@ -180,6 +180,7 @@ function fill(settings) {
   const yolo = settings.yolo || {};
   const recording = settings.recording || {};
   const motion = settings.motion || {};
+  const notifications = settings.notifications || {};
   form.elements.source_type.value = camera.source_type || 'csi';
   form.elements.device.value = camera.device || 'csi:0';
   const resolution = `${camera.width || 1280}x${camera.height || 720}`;
@@ -202,6 +203,15 @@ function fill(settings) {
   form.elements.motion_pixel_threshold.value = motion.pixel_threshold || 25;
   form.elements.motion_trigger_percent.value = motion.trigger_percent || 8;
   form.elements.motion_cooldown_seconds.value = motion.cooldown_seconds ?? 5;
+  form.elements.notification_enabled.checked = !!notifications.enabled;
+  form.elements.smtp_host.value = notifications.smtp_host || '';
+  form.elements.smtp_port.value = notifications.smtp_port || 465;
+  form.elements.smtp_security.value = notifications.security || 'ssl';
+  form.elements.smtp_sender.value = notifications.sender || '';
+  form.elements.smtp_username.value = notifications.username || '';
+  form.elements.smtp_password.value = notifications.password || '';
+  form.elements.smtp_recipient.value = notifications.recipient || '';
+  form.elements.smtp_subject_prefix.value = notifications.subject_prefix || '[PiWatch]';
   setSelectedClasses(yolo.target_classes || []);
   settingsLoaded = true;
 }
@@ -264,6 +274,17 @@ async function saveSettings() {
           trigger_percent: Math.max(0.1, Number(fields.get('motion_trigger_percent')) || 8),
           cooldown_seconds: Math.max(0, Number(fields.get('motion_cooldown_seconds')) || 0),
         },
+        notifications: {
+          enabled: form.elements.notification_enabled.checked,
+          smtp_host: String(fields.get('smtp_host') || '').trim(),
+          smtp_port: Math.max(1, Number(fields.get('smtp_port')) || 465),
+          security: fields.get('smtp_security'),
+          sender: String(fields.get('smtp_sender') || '').trim(),
+          username: String(fields.get('smtp_username') || '').trim(),
+          password: String(fields.get('smtp_password') || ''),
+          recipient: String(fields.get('smtp_recipient') || '').trim(),
+          subject_prefix: String(fields.get('smtp_subject_prefix') || '[PiWatch]').trim(),
+        },
       }),
     });
     message('已自动保存');
@@ -291,6 +312,20 @@ $('#select-all').onclick = () => { setSelectedClasses(COCO_GROUPS.flatMap(([, cl
 $('#clear-all').onclick = () => { setSelectedClasses([]); scheduleSave(); };
 form.elements.yolo_unlimited.onchange = () => {
   form.elements.yolo_sample_fps.disabled = form.elements.yolo_unlimited.checked;
+};
+$('#test-email').onclick = async () => {
+  const status = $('#email-message');
+  status.textContent = '正在保存配置并发送...';
+  try {
+    window.clearTimeout(saveTimer);
+    await saveSettings();
+    await api('/api/v1/notifications/test-email', { method: 'POST', body: '{}' });
+    status.textContent = '测试邮件已发送';
+    status.className = 'success-text';
+  } catch (error) {
+    status.textContent = error.message;
+    status.className = 'error-text';
+  }
 };
 form.addEventListener('input', scheduleSave);
 form.addEventListener('change', scheduleSave);

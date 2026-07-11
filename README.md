@@ -19,6 +19,8 @@ class filtering, YOLO26n NCNN detection overlays, and device health monitoring.
 - Range-enabled video playback and safe recording deletion
 - Debounced automatic settings persistence without a save button
 - Collapsible COCO category and recording sections
+- SMTP notifications with event details and JPEG snapshots for YOLO and motion events
+- Web-configurable mail server, account, recipient, encryption, and test-email action
 - CPU temperature, CPU utilization, memory, load average, uptime, and disk usage
 - Responsive Web UI served directly by the Python application
 
@@ -90,10 +92,16 @@ The settings page controls:
 - Important-only retention
 - Motion pixel threshold, changed-area threshold, and cooldown
 - Daily alert start and end times, including windows that cross midnight
+- SMTP mail notification settings and a test-email button
 
 Settings are saved automatically about 600 ms after a control changes. The COCO
 selector and recording library are collapsible to keep the operational view
 compact.
+
+SMTP credentials are stored only in PiWatch's local settings database. Event mail
+is sent in a background thread so a slow or unavailable mail server does not block
+recording or detection. The test message and important-event messages attach the
+current camera frame as a JPEG when a frame is available.
 
 ## Recording storage
 

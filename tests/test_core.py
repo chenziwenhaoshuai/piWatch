@@ -6,6 +6,7 @@ from datetime import datetime
 from app.yolo_detector import normalize_roi
 from app.camera import CameraManager
 from app.system_monitor import parse_cpu_times, parse_meminfo
+from app.notifications import EmailNotifier
 
 def test_settings_and_events():
     with TemporaryDirectory() as tmp:
@@ -64,3 +65,8 @@ def test_daily_alert_window_supports_midnight():
     assert in_daily_window(datetime(2026, 1, 1, 5, 59), "22:00", "06:00") is True
     assert in_daily_window(datetime(2026, 1, 1, 12, 0), "22:00", "06:00") is False
     assert in_daily_window(datetime(2026, 1, 1, 9, 0), "08:00", "10:00") is True
+
+
+def test_email_notifier_requires_configuration():
+    notifier = EmailNotifier({"enabled": True, "smtp_host": "", "recipient": ""})
+    assert notifier.enabled() is False
