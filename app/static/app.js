@@ -6,6 +6,8 @@ const detectionContext = detectionCanvas.getContext('2d');
 let settingsLoaded = false;
 let lastDetectionUpdate = null;
 let recordingFilter = 'all';
+let recordingPage = 0;
+const RECORDINGS_PAGE_SIZE = 24;
 let saveTimer = null;
 let saveInProgress = false;
 let saveQueued = false;
@@ -359,11 +361,26 @@ pollDetections();
 
 async function refreshRecordings() {
   try {
-    const query = recordingFilter === 'important' ? '?important=1' : recordingFilter === 'regular' || recordingFilter === 'alert' ? `?zone=${recordingFilter}` : '';
+    const params = new URLSearchParams({
+      limit: String(RECORDINGS_PAGE_SIZE),
+      offset: String(recordingPage * RECORDINGS_PAGE_SIZE),
+    });
+    if (recordingFilter === 'important') params.set('important', '1');
+    if (recordingFilter === 'regular' || recordingFilter === 'alert') params.set('zone', recordingFilter);
+    const query = `?${params.toString()}`;
     const data = await api(`/api/v1/recordings${query}`);
     const items = data.items || [];
     const filterNames = { all: '全部', regular: '普通区', alert: '警戒区', important: '重点' };
-    $('#recording-summary').textContent = `${filterNames[recordingFilter]} · ${items.length} 个切片`;
+    const total = Number(data.total) || 0;
+    const pageCount = Math.max(1, Math.ceil(total / RECORDINGS_PAGE_SIZE));
+    if (recordingPage >= pageCount) {
+      recordingPage = pageCount - 1;
+      return refreshRecordings();
+    }
+    $('#recording-summary').textContent = `${filterNames[recordingFilter]} · 共 ${total} 个切片`;
+    $('#recording-page').textContent = total ? `第 ${recordingPage + 1} / ${pageCount} 页` : '暂无录像';
+    $('#recording-prev').disabled = recordingPage <= 0;
+    $('#recording-next').disabled = recordingPage >= pageCount - 1;
     $('#recording-list').innerHTML = items.length ? items.map((item) => {
       const reasons = (item.important_reasons || []).map((reason) => reason === 'yolo' ? 'YOLO 目标' : reason === 'motion' ? '移动检测' : reason === 'alert_schedule' ? '警戒时段' : reason);
       const zone = item.storage_zone === 'alert' ? '警戒区' : '普通区';
@@ -385,13 +402,39 @@ async function refreshRecordings() {
 document.querySelectorAll('[data-recording-filter]').forEach((button) => {
   button.onclick = () => {
     recordingFilter = button.dataset.recordingFilter;
+    recordingPage = 0;
     document.querySelectorAll('[data-recording-filter]').forEach((item) => item.classList.toggle('active', item === button));
     refreshRecordings();
   };
 });
 
+$('#recording-prev').onclick = () => {
+  recordingPage = Math.max(0, recordingPage - 1);
+  refreshRecordings();
+};
+$('#recording-next').onclick = () => {
+  recordingPage += 1;
+  refreshRecordings();
+};
+
 refreshRecordings();
 setInterval(refreshRecordings, 15000);
+
+$('#clear-recordings').onclick = async () => {
+  const button = $('#clear-recordings');
+  if (!window.confirm('确定清空所有录像视频吗？此操作无法撤销。')) return;
+  button.disabled = true;
+  try {
+    const result = await api('/api/v1/recordings', { method: 'DELETE' });
+    message(`已清空 ${result.deleted_files || 0} 个视频文件`);
+    recordingPage = 0;
+    await Promise.all([refresh(), refreshRecordings()]);
+  } catch (error) {
+    message(error.message, true);
+  } finally {
+    button.disabled = false;
+  }
+};
 
 $('#recording-list').onclick = async (event) => {
   const button = event.target.closest('[data-recording-id]');

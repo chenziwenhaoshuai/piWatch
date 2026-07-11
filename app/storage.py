@@ -76,6 +76,20 @@ class StorageManager:
                 break
         return deleted
 
+    def clear_recordings(self) -> int:
+        deleted_files = 0
+        for path in sorted(RECORDINGS_DIR.rglob("*"), reverse=True):
+            try:
+                if path.is_file():
+                    path.unlink()
+                    deleted_files += 1
+                elif path.is_dir() and path != RECORDINGS_DIR:
+                    path.rmdir()
+            except OSError:
+                continue
+        self.db.clear_recordings()
+        return deleted_files
+
 
 class RecordingManager:
     def __init__(

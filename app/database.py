@@ -92,18 +92,38 @@ class Database:
         with self.connection() as conn:
             conn.execute("DELETE FROM events WHERE recording_id=?", (recording_id,))
             conn.execute("DELETE FROM recordings WHERE id=?", (recording_id,))
+    def clear_recordings(self) -> int:
+        with self.connection() as conn:
+            row = conn.execute("SELECT COUNT(*) AS count FROM recordings").fetchone()
+            count = int(row["count"] if row else 0)
+            conn.execute("DELETE FROM events WHERE recording_id IS NOT NULL")
+            conn.execute("DELETE FROM recordings")
+            return count
     def create_event(self, event_type: str, recording_id: int | None, details: dict[str, Any] | None = None) -> int:
         with self.connection() as conn:
             cur = conn.execute("INSERT INTO events(type,started_at,recording_id,details,created_at) VALUES(?,?,?,?,?)",
                 (event_type, utc_now(), recording_id, json.dumps(details or {}, ensure_ascii=False), utc_now()))
             return int(cur.lastrowid)
-    def list_recordings(self, limit: int = 50, important_only: bool = False) -> list[dict[str, Any]]:
-        query = "SELECT * FROM recordings"
+    def _recording_filters(self, important_only: bool = False, zone: str = "") -> tuple[str, list[Any]]:
+        filters = []
         values: list[Any] = []
         if important_only:
-            query += " WHERE important=1"
-        query += " ORDER BY id DESC LIMIT ?"
-        values.append(limit)
+            filters.append("important=1")
+        if zone in {"regular", "alert"}:
+            filters.append("storage_zone=?")
+            values.append(zone)
+        return (" WHERE " + " AND ".join(filters)) if filters else "", values
+    def count_recordings(self, important_only: bool = False, zone: str = "") -> int:
+        where, values = self._recording_filters(important_only, zone)
+        with self.connection() as conn:
+            row = conn.execute(f"SELECT COUNT(*) AS count FROM recordings{where}", values).fetchone()
+        return int(row["count"] if row else 0)
+    def list_recordings(self, limit: int = 50, important_only: bool = False, offset: int = 0, zone: str = "") -> list[dict[str, Any]]:
+        query = "SELECT * FROM recordings"
+        where, values = self._recording_filters(important_only, zone)
+        query += where
+        query += " ORDER BY id DESC LIMIT ? OFFSET ?"
+        values.extend((max(1, int(limit)), max(0, int(offset))))
         with self.connection() as conn: rows = conn.execute(query, values).fetchall()
         return [self._recording_dict(row) for row in rows]
     def list_events(self, limit: int = 50) -> list[dict[str, Any]]:

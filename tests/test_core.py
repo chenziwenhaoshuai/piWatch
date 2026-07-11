@@ -3,7 +3,7 @@ from tempfile import TemporaryDirectory
 from app.database import Database
 from app.storage import StorageManager, in_daily_window
 from datetime import datetime
-from app.yolo_detector import normalize_roi
+from app.yolo_detector import ConsecutiveDetectionGate, Detection, normalize_roi
 from app.camera import CameraManager
 from app.system_monitor import parse_cpu_times, parse_meminfo
 from app.notifications import EmailNotifier, notification_allows
@@ -22,6 +22,26 @@ def test_normalize_roi_clamps_to_frame():
     x1, y1, x2, y2 = normalize_roi({"x": 2, "y": -1, "width": 2, "height": 2}, 100, 80)
     assert 0 <= x1 < x2 <= 100
     assert 0 <= y1 < y2 <= 80
+
+
+def test_consecutive_detection_gate_requires_three_hits():
+    gate = ConsecutiveDetectionGate()
+    detections = [Detection("person", 0.8, (0, 0, 10, 10))]
+
+    assert gate.update(detections, 3) is False
+    assert gate.update(detections, 3) is False
+    assert gate.update(detections, 3) is True
+
+
+def test_consecutive_detection_gate_resets_on_empty_frame():
+    gate = ConsecutiveDetectionGate()
+    detections = [Detection("person", 0.8, (0, 0, 10, 10))]
+
+    assert gate.update(detections, 3) is False
+    assert gate.update([], 3) is False
+    assert gate.update(detections, 3) is False
+    assert gate.update(detections, 3) is False
+    assert gate.update(detections, 3) is True
 
 
 def test_camera_configuration_is_bounded():
@@ -58,6 +78,36 @@ def test_recording_filter_and_delete():
         assert [item["id"] for item in db.list_recordings(10, True)] == [second]
         db.delete_recording(first)
         assert db.get_recording(first) is None
+
+
+def test_recording_pagination_and_counts():
+    with TemporaryDirectory() as tmp:
+        db = Database(Path(tmp) / "test.db")
+        first = db.create_recording("csi", str(Path(tmp) / "first.mp4"), False, "regular")
+        second = db.create_recording("csi", str(Path(tmp) / "second.mp4"), False, "alert")
+        third = db.create_recording("csi", str(Path(tmp) / "third.mp4"), False, "regular")
+        db.mark_recording_important(second, "yolo")
+
+        assert db.count_recordings() == 3
+        assert [item["id"] for item in db.list_recordings(limit=2)] == [third, second]
+        assert [item["id"] for item in db.list_recordings(limit=2, offset=2)] == [first]
+        assert db.count_recordings(zone="regular") == 2
+        assert [item["id"] for item in db.list_recordings(zone="alert")] == [second]
+        assert db.count_recordings(important_only=True) == 1
+        assert [item["id"] for item in db.list_recordings(important_only=True)] == [second]
+
+
+def test_clear_recordings_removes_recordings_and_related_events():
+    with TemporaryDirectory() as tmp:
+        db = Database(Path(tmp) / "test.db")
+        first = db.create_recording("csi", str(Path(tmp) / "first.mp4"), False)
+        second = db.create_recording("csi", str(Path(tmp) / "second.mp4"), False)
+        db.create_event("motion", first, {"score": 1})
+        db.create_event("manual", None, {"note": "keep"})
+
+        assert db.clear_recordings() == 2
+        assert db.list_recordings() == []
+        assert [event["type"] for event in db.list_events()] == ["manual"]
 
 
 def test_daily_alert_window_supports_midnight():

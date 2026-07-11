@@ -91,11 +91,23 @@ def normalize_roi(value: Any, width: int, height: int) -> tuple[int, int, int, i
     return x1, y1, x2, y2
 
 
+class ConsecutiveDetectionGate:
+    def __init__(self):
+        self.count = 0
+
+    def update(self, detections: list[Detection], required_hits: int) -> bool:
+        if detections:
+            self.count += 1
+        else:
+            self.count = 0
+        return bool(detections) and self.count >= max(1, int(required_hits))
+
+
 class DetectionWorker:
     def __init__(
         self,
         settings_getter: Callable[[], dict[str, Any]],
-        event_callback: Callable[[list[Detection]], None],
+        event_callback: Callable[[list[Detection], bool], None],
         frame_getter: Callable[[], bytes | None] | None = None,
     ):
         self.settings_getter = settings_getter
@@ -109,6 +121,7 @@ class DetectionWorker:
         self.last_inference_ms: float | None = None
         self.actual_fps: float | None = None
         self._last_completed_at: float | None = None
+        self._alert_gate = ConsecutiveDetectionGate()
         self.last_frame_size: tuple[int, int] | None = None
         self.last_updated_at: float | None = None
         self.current_config: dict[str, Any] = {}
@@ -208,11 +221,14 @@ class DetectionWorker:
                 self.last_updated_at = time.time()
                 self.last_error = None
                 self.last_detections = detections
+                required_hits = max(1, int(config.get("alert_consecutive_frames", 3)))
                 now = time.monotonic()
                 cooldown = max(0, int(config.get("alert_cooldown_seconds", 300)))
-                if detections and now - self.last_alert_at >= cooldown:
-                    self.last_alert_at = now
-                    self.event_callback(detections)
+                if self._alert_gate.update(detections, required_hits):
+                    should_notify = now - self.last_alert_at >= cooldown
+                    if should_notify:
+                        self.last_alert_at = now
+                    self.event_callback(detections, should_notify)
                 sample_fps = max(0, int(config.get("sample_fps", 2)))
                 if sample_fps:
                     target_period = 1 / sample_fps

@@ -24,7 +24,7 @@ DEFAULTS: dict[str, Any] = {
     "storage": {"retention_days": 7, "max_used_percent": 70},
     "recording": {"enabled": True, "segment_seconds": 60, "max_storage_gb": 64, "important_only": False, "alert_schedule_enabled": False, "alert_start": "22:00", "alert_end": "06:00"},
     "motion": {"enabled": True, "analysis_width": 320, "pixel_threshold": 25, "trigger_percent": 8, "cooldown_seconds": 5, "event_types": ["motion", "camera_disconnected", "storage_low", "temperature_high"]},
-    "yolo": {"enabled": True, "model_path": "/var/lib/piwatch/models/yolo26n_ncnn_model", "confidence": 0.4, "imgsz": 416, "sample_fps": 2, "alert_cooldown_seconds": 300, "target_classes": ["person", "bird", "cat", "dog", "horse", "sheep", "cow", "elephant", "bear", "zebra", "giraffe"], "roi": {"x": 0, "y": 0, "width": 1, "height": 1}},
+    "yolo": {"enabled": True, "model_path": "/var/lib/piwatch/models/yolo26n_ncnn_model", "confidence": 0.4, "imgsz": 416, "sample_fps": 2, "alert_cooldown_seconds": 300, "alert_consecutive_frames": 3, "target_classes": ["person", "bird", "cat", "dog", "horse", "sheep", "cow", "elephant", "bear", "zebra", "giraffe"], "roi": {"x": 0, "y": 0, "width": 1, "height": 1}},
     "notifications": {"enabled": False, "send_motion": True, "send_yolo": True, "alert_window_only": False, "smtp_host": "", "smtp_port": 465, "security": "ssl", "sender": "", "username": "", "password": "", "recipient": "", "subject_prefix": "[PiWatch]"},
 }
 
@@ -168,9 +168,11 @@ class AppState:
             "fps": camera.get("fps", 15),
         }
 
-    def _on_detection(self, detections: list[Detection]) -> None:
+    def _on_detection(self, detections: list[Detection], should_notify: bool = True) -> None:
         details = {"detections": [d.__dict__ for d in detections], "roi": self.db.get_setting("yolo", {}).get("roi")}
         recording_id = self.recorder.mark_important("yolo")
+        if not should_notify:
+            return
         event_id = self.db.create_event("yolo_target_detected", recording_id, details)
         labels = ", ".join(f"{d.label} ({d.confidence:.2f})" for d in detections)
         self._notify_important_event(
@@ -247,10 +249,7 @@ class Handler(BaseHTTPRequestHandler):
             "/api/v1/detections": STATE.detector.detection_status,
             "/api/v1/settings": STATE.settings,
             "/api/v1/cameras": lambda: {"items": STATE.camera.list_devices()},
-            "/api/v1/recordings": lambda: {"items": filter_recordings(
-                STATE.db.list_recordings(200, query.get("important", ["0"])[0] == "1"),
-                query.get("zone", [""])[0],
-            )},
+            "/api/v1/recordings": lambda: paged_recordings(query),
             "/api/v1/events": lambda: {"items": STATE.db.list_events()},
         }
         if path in routes:
@@ -302,6 +301,19 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_DELETE(self):
         path = urlparse(self.path).path
+        if path == "/api/v1/recordings":
+            recording = STATE.db.get_setting("recording", {})
+            restart_recording = bool(recording.get("enabled"))
+            try:
+                STATE.recorder.stop()
+                deleted = STATE.storage.clear_recordings()
+                if restart_recording:
+                    STATE.recorder.start()
+                return self.json({"ok": True, "deleted_files": deleted})
+            except Exception as exc:
+                if restart_recording:
+                    STATE.recorder.start()
+                return self.json({"error": {"code": "CLEAR_FAILED", "message": str(exc)}}, HTTPStatus.BAD_REQUEST)
         if path.startswith("/api/v1/recordings/"):
             try:
                 recording_id = int(path.rsplit("/", 1)[1])
@@ -427,10 +439,18 @@ def validate_time(value: Any) -> str:
 
 
 
-def filter_recordings(items: list[dict[str, Any]], zone: str) -> list[dict[str, Any]]:
-    if zone not in {"regular", "alert"}:
-        return items
-    return [item for item in items if item.get("storage_zone", "regular") == zone]
+def paged_recordings(query: dict[str, list[str]]) -> dict[str, Any]:
+    important_only = query.get("important", ["0"])[0] == "1"
+    zone = query.get("zone", [""])[0]
+    limit = max(1, min(100, int(query.get("limit", ["24"])[0])))
+    offset = max(0, int(query.get("offset", ["0"])[0]))
+    total = STATE.db.count_recordings(important_only, zone)
+    return {
+        "items": STATE.db.list_recordings(limit, important_only, offset, zone),
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+    }
 
 
 def run(host: str = "0.0.0.0", port: int | None = None):
