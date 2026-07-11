@@ -124,6 +124,9 @@
           </div>
           <div class="form-grid">
             <label class="toggle-field"><input name="notification_enabled" type="checkbox"><span>启用邮件通知</span></label>
+            <label class="toggle-field"><input name="notification_send_motion" type="checkbox" checked><span>发送移动检测</span></label>
+            <label class="toggle-field"><input name="notification_send_yolo" type="checkbox" checked><span>发送 YOLO 事件</span></label>
+            <label class="toggle-field"><input name="notification_alert_only" type="checkbox"><span>只发送警戒时间内的事件</span></label>
             <label>SMTP 服务器<input name="smtp_host" placeholder="smtp.example.com" autocomplete="off"></label>
             <label>SMTP 端口<input name="smtp_port" type="number" min="1" max="65535" value="465"></label>
             <label>连接加密<select name="smtp_security"><option value="ssl">SSL/TLS</option><option value="starttls">STARTTLS</option><option value="none">无加密</option></select></label>

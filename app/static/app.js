@@ -204,6 +204,9 @@ function fill(settings) {
   form.elements.motion_trigger_percent.value = motion.trigger_percent || 8;
   form.elements.motion_cooldown_seconds.value = motion.cooldown_seconds ?? 5;
   form.elements.notification_enabled.checked = !!notifications.enabled;
+  form.elements.notification_send_motion.checked = notifications.send_motion !== false;
+  form.elements.notification_send_yolo.checked = notifications.send_yolo !== false;
+  form.elements.notification_alert_only.checked = !!notifications.alert_window_only;
   form.elements.smtp_host.value = notifications.smtp_host || '';
   form.elements.smtp_port.value = notifications.smtp_port || 465;
   form.elements.smtp_security.value = notifications.security || 'ssl';
@@ -276,6 +279,9 @@ async function saveSettings() {
         },
         notifications: {
           enabled: form.elements.notification_enabled.checked,
+          send_motion: form.elements.notification_send_motion.checked,
+          send_yolo: form.elements.notification_send_yolo.checked,
+          alert_window_only: form.elements.notification_alert_only.checked,
           smtp_host: String(fields.get('smtp_host') || '').trim(),
           smtp_port: Math.max(1, Number(fields.get('smtp_port')) || 465),
           security: fields.get('smtp_security'),

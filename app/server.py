@@ -13,7 +13,7 @@ from urllib.parse import parse_qs, urlparse
 from .camera import CameraManager
 from .config import RECORDINGS_DIR, STATIC_DIR, TEMPLATES_DIR
 from .database import Database
-from .notifications import EmailNotifier
+from .notifications import EmailNotifier, notification_allows
 from .storage import RecordingManager, StorageManager
 from .system_monitor import SystemMonitor
 from .yolo_detector import Detection, DetectionWorker
@@ -25,7 +25,7 @@ DEFAULTS: dict[str, Any] = {
     "recording": {"enabled": True, "segment_seconds": 60, "max_storage_gb": 64, "important_only": False, "alert_schedule_enabled": False, "alert_start": "22:00", "alert_end": "06:00"},
     "motion": {"enabled": True, "analysis_width": 320, "pixel_threshold": 25, "trigger_percent": 8, "cooldown_seconds": 5, "event_types": ["motion", "camera_disconnected", "storage_low", "temperature_high"]},
     "yolo": {"enabled": True, "model_path": "/var/lib/piwatch/models/yolo26n_ncnn_model", "confidence": 0.4, "imgsz": 416, "sample_fps": 2, "alert_cooldown_seconds": 300, "target_classes": ["person", "bird", "cat", "dog", "horse", "sheep", "cow", "elephant", "bear", "zebra", "giraffe"], "roi": {"x": 0, "y": 0, "width": 1, "height": 1}},
-    "notifications": {"enabled": False, "smtp_host": "", "smtp_port": 465, "security": "ssl", "sender": "", "username": "", "password": "", "recipient": "", "subject_prefix": "[PiWatch]"},
+    "notifications": {"enabled": False, "send_motion": True, "send_yolo": True, "alert_window_only": False, "smtp_host": "", "smtp_port": 465, "security": "ssl", "sender": "", "username": "", "password": "", "recipient": "", "subject_prefix": "[PiWatch]"},
 }
 
 MODELS_DIR = Path(os.getenv("PIWATCH_MODELS_DIR", "/var/lib/piwatch/models"))
@@ -40,8 +40,13 @@ YOLO_MODEL_PATHS = {
 
 def merge_defaults(db: Database) -> None:
     for key, value in DEFAULTS.items():
-        if db.get_setting(key) is None:
+        current = db.get_setting(key)
+        if current is None:
             db.set_setting(key, value)
+        elif isinstance(current, dict):
+            merged = {**value, **current}
+            if merged != current:
+                db.set_setting(key, merged)
 
 
 class AppState:
@@ -169,6 +174,7 @@ class AppState:
         event_id = self.db.create_event("yolo_target_detected", recording_id, details)
         labels = ", ".join(f"{d.label} ({d.confidence:.2f})" for d in detections)
         self._notify_important_event(
+            "yolo",
             "YOLO 目标报警",
             f"检测到目标：{labels}\n事件 ID：{event_id}\n录像 ID：{recording_id or '无'}\nROI：{details['roi']}",
             event_id,
@@ -178,14 +184,16 @@ class AppState:
         recording_id = self.recorder.mark_important("motion")
         event_id = self.db.create_event("motion", recording_id, {"score_percent": score})
         self._notify_important_event(
+            "motion",
             "移动检测报警",
             f"画面变化面积：{score:.2f}%\n事件 ID：{event_id}\n录像 ID：{recording_id or '无'}",
             event_id,
         )
 
-    def _notify_important_event(self, title: str, body: str, event_id: int) -> None:
+    def _notify_important_event(self, event_type: str, title: str, body: str, event_id: int) -> None:
         notification = self.db.get_setting("notifications", {})
-        if not notification.get("enabled"):
+        recording = self.db.get_setting("recording", {})
+        if not notification_allows(event_type, notification, recording, datetime.now().astimezone()):
             return
         frame = self.camera.latest_frame()
         timestamp = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S %z")
@@ -415,6 +423,8 @@ def validate_time(value: Any) -> str:
     if not (0 <= hour <= 23 and 0 <= minute <= 59):
         raise ValueError("time_must_be_hh_mm")
     return f"{hour:02d}:{minute:02d}"
+
+
 
 
 def filter_recordings(items: list[dict[str, Any]], zone: str) -> list[dict[str, Any]]:

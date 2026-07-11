@@ -1,7 +1,23 @@
 ﻿from __future__ import annotations
 import smtplib, ssl
+from datetime import datetime
 from email.message import EmailMessage
 from typing import Any
+from .storage import in_daily_window
+
+
+def notification_allows(event_type: str, notification: dict[str, Any], recording: dict[str, Any], now: datetime) -> bool:
+    if not notification.get("enabled"):
+        return False
+    if event_type == "motion" and notification.get("send_motion", True) is False:
+        return False
+    if event_type == "yolo" and notification.get("send_yolo", True) is False:
+        return False
+    if notification.get("alert_window_only"):
+        return in_daily_window(now, str(recording.get("alert_start", "22:00")), str(recording.get("alert_end", "06:00")))
+    return True
+
+
 class EmailNotifier:
     def __init__(self, settings: dict[str, Any]): self.settings = settings
     def enabled(self): return bool(self.settings.get("enabled") and self.settings.get("smtp_host") and self.settings.get("recipient"))

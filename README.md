@@ -21,6 +21,7 @@ class filtering, YOLO26n NCNN detection overlays, and device health monitoring.
 - Collapsible COCO category and recording sections
 - SMTP notifications with event details and JPEG snapshots for YOLO and motion events
 - Web-configurable mail server, account, recipient, encryption, and test-email action
+- Independent motion/YOLO mail switches and optional alert-window-only delivery
 - CPU temperature, CPU utilization, memory, load average, uptime, and disk usage
 - Responsive Web UI served directly by the Python application
 
