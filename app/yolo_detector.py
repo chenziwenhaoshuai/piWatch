@@ -115,6 +115,7 @@ class DetectionWorker:
         self.frame_getter = frame_getter
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
+        self._lock = threading.Lock()
         self.last_error: str | None = None
         self.last_detections: list[Detection] = []
         self.last_alert_at = 0.0
@@ -146,6 +147,7 @@ class DetectionWorker:
     def status(self) -> dict[str, Any]:
         config = self.settings_getter()
         detector = YoloDetector(config)
+        snapshot = self.snapshot()
         return {
             "enabled": bool(config.get("enabled")),
             "running": self.running,
@@ -154,29 +156,31 @@ class DetectionWorker:
             "imgsz": int(config.get("imgsz", 640)),
             "sample_fps": max(0, int(config.get("sample_fps", 2))),
             "target_classes": config.get("target_classes", []),
-            "last_detections": [d.__dict__ for d in self.last_detections],
-            "last_inference_ms": self.last_inference_ms,
-            "actual_fps": self.actual_fps,
-            "frame_size": list(self.last_frame_size) if self.last_frame_size else None,
-            "updated_at": self.last_updated_at,
-            "error": self.last_error,
+            **snapshot,
         }
 
     def detection_status(self) -> dict[str, Any]:
         config = self.current_config
+        snapshot = self.snapshot()
         return {
             "enabled": bool(config.get("enabled")),
             "running": self.running,
             "model_path": config.get("model_path"),
             "imgsz": int(config.get("imgsz", 640)),
             "sample_fps": max(0, int(config.get("sample_fps", 2))),
-            "last_detections": [d.__dict__ for d in self.last_detections],
-            "last_inference_ms": self.last_inference_ms,
-            "actual_fps": self.actual_fps,
-            "frame_size": list(self.last_frame_size) if self.last_frame_size else None,
-            "updated_at": self.last_updated_at,
-            "error": self.last_error,
+            **snapshot,
         }
+
+    def snapshot(self) -> dict[str, Any]:
+        with self._lock:
+            return {
+                "last_detections": [d.__dict__ for d in self.last_detections],
+                "last_inference_ms": self.last_inference_ms,
+                "actual_fps": self.actual_fps,
+                "frame_size": list(self.last_frame_size) if self.last_frame_size else None,
+                "updated_at": self.last_updated_at,
+                "error": self.last_error,
+            }
 
     def _run(self) -> None:
         try:
@@ -212,15 +216,16 @@ class DetectionWorker:
                 started = time.monotonic()
                 detections = detector.detect(frame, config)
                 inference_seconds = time.monotonic() - started
-                self.last_inference_ms = round(inference_seconds * 1000, 1)
                 completed_at = time.monotonic()
-                if self._last_completed_at is not None and completed_at > self._last_completed_at:
-                    self.actual_fps = round(1 / (completed_at - self._last_completed_at), 2)
-                self._last_completed_at = completed_at
-                self.last_frame_size = (int(frame.shape[1]), int(frame.shape[0]))
-                self.last_updated_at = time.time()
-                self.last_error = None
-                self.last_detections = detections
+                with self._lock:
+                    self.last_inference_ms = round(inference_seconds * 1000, 1)
+                    if self._last_completed_at is not None and completed_at > self._last_completed_at:
+                        self.actual_fps = round(1 / (completed_at - self._last_completed_at), 2)
+                    self._last_completed_at = completed_at
+                    self.last_frame_size = (int(frame.shape[1]), int(frame.shape[0]))
+                    self.last_updated_at = time.time()
+                    self.last_error = None
+                    self.last_detections = detections
                 required_hits = max(1, int(config.get("alert_consecutive_frames", 3)))
                 now = time.monotonic()
                 cooldown = max(0, int(config.get("alert_cooldown_seconds", 300)))

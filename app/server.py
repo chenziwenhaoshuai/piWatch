@@ -60,14 +60,15 @@ class AppState:
         self.system = SystemMonitor()
         camera = self.db.get_setting("camera")
         self.camera.configure(camera)
+        self.detector = DetectionWorker(self._detection_settings, self._on_detection, self.camera.latest_frame)
         self.recorder = RecordingManager(
             self.storage,
             self.settings,
             self.camera.latest_frame,
             self.camera.status,
             self._on_motion,
+            lambda: self.detector.snapshot(),
         )
-        self.detector = DetectionWorker(self._detection_settings, self._on_detection, self.camera.latest_frame)
         if self.db.get_setting("recording", {}).get("enabled"):
             self.recorder.start()
         if self.db.get_setting("yolo", {}).get("enabled"):

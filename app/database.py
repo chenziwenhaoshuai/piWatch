@@ -46,6 +46,8 @@ class Database:
                 conn.execute("ALTER TABLE recordings ADD COLUMN important_reasons TEXT NOT NULL DEFAULT '[]'")
             if "storage_zone" not in columns:
                 conn.execute("ALTER TABLE recordings ADD COLUMN storage_zone TEXT NOT NULL DEFAULT 'regular'")
+            if "detection_marks" not in columns:
+                conn.execute("ALTER TABLE recordings ADD COLUMN detection_marks TEXT NOT NULL DEFAULT '[]'")
             conn.execute("UPDATE recordings SET status='interrupted',ended_at=? WHERE status='recording'", (utc_now(),))
     def set_setting(self, key: str, value: Any) -> None:
         with self.connection() as conn:
@@ -88,6 +90,32 @@ class Database:
             if reason not in reasons: reasons.append(reason)
             conn.execute("UPDATE recordings SET important=1,protected=1,important_reasons=? WHERE id=?",
                 (json.dumps(reasons, ensure_ascii=False), recording_id))
+    def add_recording_detection_mark(self, recording_id: int, offset_seconds: float, detections: list[dict[str, Any]]) -> None:
+        second = max(0, int(offset_seconds))
+        compact = [
+            {
+                "label": str(item.get("label", "")),
+                "confidence": round(float(item.get("confidence", 0)), 3),
+            }
+            for item in detections
+            if item.get("label")
+        ]
+        if not compact:
+            return
+        with self.connection() as conn:
+            row = conn.execute("SELECT detection_marks FROM recordings WHERE id=?", (recording_id,)).fetchone()
+            if not row:
+                return
+            try: marks = json.loads(row["detection_marks"] or "[]")
+            except json.JSONDecodeError: marks = []
+            for mark in marks:
+                if int(mark.get("second", -1)) == second:
+                    return
+            marks.append({"second": second, "detections": compact})
+            conn.execute(
+                "UPDATE recordings SET detection_marks=? WHERE id=?",
+                (json.dumps(marks, ensure_ascii=False), recording_id),
+            )
     def delete_recording(self, recording_id: int) -> None:
         with self.connection() as conn:
             conn.execute("DELETE FROM events WHERE recording_id=?", (recording_id,))
@@ -136,6 +164,8 @@ class Database:
         result = dict(row)
         try: result["important_reasons"] = json.loads(result.get("important_reasons") or "[]")
         except json.JSONDecodeError: result["important_reasons"] = []
+        try: result["detection_marks"] = json.loads(result.get("detection_marks") or "[]")
+        except json.JSONDecodeError: result["detection_marks"] = []
         result["important"] = bool(result.get("important"))
         result["protected"] = bool(result.get("protected"))
         return result

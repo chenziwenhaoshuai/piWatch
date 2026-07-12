@@ -50,6 +50,11 @@ function formatDuration(seconds) {
   return `${Math.floor(value / 60)}:${String(value % 60).padStart(2, '0')}`;
 }
 
+function formatTimestamp(seconds) {
+  const value = Math.max(0, Math.round(Number(seconds) || 0));
+  return `${String(Math.floor(value / 60)).padStart(2, '0')}:${String(value % 60).padStart(2, '0')}`;
+}
+
 function formatDate(value) {
   if (!value) return '--';
   return new Date(value).toLocaleString('zh-CN', { hour12: false });
@@ -384,12 +389,18 @@ async function refreshRecordings() {
     $('#recording-list').innerHTML = items.length ? items.map((item) => {
       const reasons = (item.important_reasons || []).map((reason) => reason === 'yolo' ? 'YOLO 目标' : reason === 'motion' ? '移动检测' : reason === 'alert_schedule' ? '警戒时段' : reason);
       const zone = item.storage_zone === 'alert' ? '警戒区' : '普通区';
+      const marks = item.detection_marks || [];
+      const markHtml = marks.length ? `<div class="reason-list detection-marks">${marks.slice(0, 8).map((mark) => {
+        const labels = (mark.detections || []).map((detection) => `${detection.label} ${Number(detection.confidence || 0).toFixed(2)}`).join(', ');
+        return `<span>${formatTimestamp(mark.second)} ${labels}</span>`;
+      }).join('')}${marks.length > 8 ? `<span>+${marks.length - 8}</span>` : ''}</div>` : '';
       return `<article class="recording-item">
         <video controls preload="metadata" src="/api/v1/recordings/${item.id}/video"></video>
         <div class="recording-meta">
           <div class="recording-title"><strong>${formatDate(item.started_at)}</strong>${item.important ? '<span class="important-badge">重点</span>' : ''}</div>
           <p>${zone} · ${formatDuration(item.duration_seconds)} · ${formatBytes(item.size_bytes)} · ${item.status === 'recording' ? '录制中' : '已完成'}</p>
           ${reasons.length ? `<div class="reason-list">${reasons.map((reason) => `<span>${reason}</span>`).join('')}</div>` : ''}
+          ${markHtml}
           ${item.status === 'recording' ? '' : `<button type="button" class="delete-recording" data-recording-id="${item.id}">删除视频</button>`}
         </div>
       </article>`;

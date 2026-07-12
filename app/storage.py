@@ -99,12 +99,14 @@ class RecordingManager:
         frame_getter: Callable[[], bytes | None],
         camera_status_getter: Callable[[], dict[str, Any]],
         motion_callback: Callable[[float], None],
+        detection_getter: Callable[[], dict[str, Any]] | None = None,
     ):
         self.storage = storage
         self.settings_getter = settings_getter
         self.frame_getter = frame_getter
         self.camera_status_getter = camera_status_getter
         self.motion_callback = motion_callback
+        self.detection_getter = detection_getter
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._lock = threading.Lock()
@@ -113,6 +115,7 @@ class RecordingManager:
         self.last_error: str | None = None
         self.motion_score = 0.0
         self.last_motion_at: float | None = None
+        self._last_detection_mark_second: int | None = None
 
     @property
     def active(self) -> bool:
@@ -188,7 +191,8 @@ class RecordingManager:
                     continue
                 next_frame_at = now + 1 / fps
                 try:
-                    self._process.stdin.write(payload)
+                    output_payload = self._annotate_frame(payload, now)
+                    self._process.stdin.write(output_payload)
                     self._process.stdin.flush()
                 except (BrokenPipeError, OSError) as exc:
                     self.last_error = f"recording_encoder_failed:{exc}"
@@ -231,6 +235,7 @@ class RecordingManager:
         with self._lock:
             self._session = session
             self._process = process
+            self._last_detection_mark_second = None
         self.last_error = None
 
     def _close_segment(self, status: str) -> RecordingSession | None:
@@ -291,6 +296,55 @@ class RecordingManager:
         except Exception as exc:
             self.last_error = f"motion_detection_failed:{exc}"
             return previous_gray
+
+    def _annotate_frame(self, payload: bytes, now: float) -> bytes:
+        detection = self.detection_getter() if self.detection_getter else None
+        if not detection:
+            return payload
+        detections = detection.get("last_detections") or []
+        frame_size = detection.get("frame_size") or None
+        updated_at = detection.get("updated_at")
+        if not detections or not frame_size or updated_at is None or time.time() - float(updated_at) > 2.0:
+            return payload
+        self._record_detection_mark(now, detections)
+        try:
+            import cv2
+            import numpy as np
+            frame = cv2.imdecode(np.frombuffer(payload, dtype="uint8"), cv2.IMREAD_COLOR)
+            if frame is None:
+                return payload
+            source_width, source_height = int(frame_size[0]), int(frame_size[1])
+            frame_height, frame_width = frame.shape[:2]
+            scale_x = frame_width / source_width if source_width else 1
+            scale_y = frame_height / source_height if source_height else 1
+            for item in detections:
+                box = item.get("box") or []
+                if len(box) != 4:
+                    continue
+                x1, y1, x2, y2 = [int(value) for value in box]
+                x1, x2 = sorted((max(0, min(frame_width - 1, int(x1 * scale_x))), max(0, min(frame_width - 1, int(x2 * scale_x)))))
+                y1, y2 = sorted((max(0, min(frame_height - 1, int(y1 * scale_y))), max(0, min(frame_height - 1, int(y2 * scale_y)))))
+                label = f"{item.get('label', 'object')} {float(item.get('confidence', 0)):.2f}"
+                cv2.rectangle(frame, (x1, y1), (x2, y2), (36, 209, 126), 2)
+                label_y = max(18, y1 - 6)
+                cv2.putText(frame, label, (x1, label_y), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (7, 16, 20), 3, cv2.LINE_AA)
+                cv2.putText(frame, label, (x1, label_y), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (36, 209, 126), 1, cv2.LINE_AA)
+            ok, encoded = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), 85])
+            return encoded.tobytes() if ok else payload
+        except Exception as exc:
+            self.last_error = f"recording_annotation_failed:{exc}"
+            return payload
+
+    def _record_detection_mark(self, now: float, detections: list[dict[str, Any]]) -> None:
+        with self._lock:
+            session = self._session
+        if session is None:
+            return
+        second = max(0, int(now - session.started_monotonic))
+        if self._last_detection_mark_second is not None and second - self._last_detection_mark_second < 10:
+            return
+        self.storage.db.add_recording_detection_mark(session.recording_id, second, detections)
+        self._last_detection_mark_second = second
 
 
 def changed_percent(previous: Any, current: Any, pixel_threshold: int, cv2: Any) -> float:

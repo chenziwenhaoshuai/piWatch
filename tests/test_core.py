@@ -1,7 +1,7 @@
 ﻿from pathlib import Path
 from tempfile import TemporaryDirectory
 from app.database import Database
-from app.storage import StorageManager, in_daily_window
+from app.storage import RecordingSession, StorageManager, RecordingManager, in_daily_window
 from datetime import datetime
 from app.yolo_detector import ConsecutiveDetectionGate, Detection, normalize_roi
 from app.camera import CameraManager
@@ -82,6 +82,36 @@ def test_recording_important_reasons_are_unique():
         recording = db.get_recording(recording_id)
         assert recording["important"] is True
         assert recording["important_reasons"] == ["motion", "yolo"]
+
+
+def test_recording_detection_marks_are_unique_per_second():
+    with TemporaryDirectory() as tmp:
+        db = Database(Path(tmp) / "test.db")
+        recording_id = db.create_recording("csi", str(Path(tmp) / "clip.mp4"), False)
+        db.add_recording_detection_mark(recording_id, 12.4, [{"label": "person", "confidence": 0.81234}])
+        db.add_recording_detection_mark(recording_id, 12.8, [{"label": "person", "confidence": 0.9}])
+        db.add_recording_detection_mark(recording_id, 13.1, [{"label": "dog", "confidence": 0.71234}])
+
+        assert db.get_recording(recording_id)["detection_marks"] == [
+            {"second": 12, "detections": [{"label": "person", "confidence": 0.812}]},
+            {"second": 13, "detections": [{"label": "dog", "confidence": 0.712}]},
+        ]
+
+
+def test_recording_detection_marks_are_throttled():
+    with TemporaryDirectory() as tmp:
+        db = Database(Path(tmp) / "test.db")
+        storage = StorageManager(db)
+        session = RecordingSession(db.create_recording("csi", str(Path(tmp) / "clip.mp4"), False), Path(tmp) / "clip.mp4", 100.0, "csi", False)
+        manager = RecordingManager(storage, lambda: {"recording": {}}, lambda: None, lambda: {}, lambda score: None)
+        manager._session = session
+        detections = [{"label": "person", "confidence": 0.8}]
+
+        manager._record_detection_mark(105.0, detections)
+        manager._record_detection_mark(109.0, detections)
+        manager._record_detection_mark(115.0, detections)
+
+        assert [mark["second"] for mark in db.get_recording(session.recording_id)["detection_marks"]] == [5, 15]
 
 
 def test_recording_filter_and_delete():
