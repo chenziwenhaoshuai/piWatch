@@ -93,6 +93,7 @@ class AppState:
         return self.db.get_settings()
 
     def update_settings(self, payload: dict[str, Any]) -> dict[str, Any]:
+        previous_camera = self.db.get_setting("camera", {})
         for key, value in payload.items():
             if key not in DEFAULTS:
                 continue
@@ -133,6 +134,13 @@ class AppState:
             current.update(value)
             self.db.set_setting(key, current)
         camera = self.db.get_setting("camera")
+        camera_changed = any(
+            previous_camera.get(field) != camera.get(field)
+            for field in ("source_type", "device", "width", "height", "fps")
+        )
+        if camera_changed:
+            self.detector.stop()
+            self.recorder.stop()
         self.camera.configure(camera)
         if self.db.get_setting("recording", {}).get("enabled"):
             self.recorder.start()

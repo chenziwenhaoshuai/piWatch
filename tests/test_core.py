@@ -50,6 +50,21 @@ def test_camera_configuration_is_bounded():
     assert (camera.width, camera.height, camera.fps) == (3840, 240, 60)
 
 
+def test_camera_reconfigure_stops_previous_preview_before_applying_new_size():
+    camera = CameraManager()
+    camera.width, camera.height = 1920, 1080
+    seen = {}
+
+    def fake_stop_preview():
+        seen["size_during_stop"] = (camera.width, camera.height)
+
+    camera.stop_preview = fake_stop_preview
+    camera.configure({"source_type": "csi", "device": "csi:0", "width": 640, "height": 480, "fps": 15})
+
+    assert seen["size_during_stop"] == (1920, 1080)
+    assert (camera.width, camera.height) == (640, 480)
+
+
 def test_system_monitor_parsers():
     assert parse_cpu_times("cpu  10 2 3 20 5 1 1 0\n") == (42, 25)
     memory = parse_meminfo("MemTotal: 1000 kB\nMemAvailable: 250 kB\n")
