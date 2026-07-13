@@ -65,6 +65,7 @@ class AppState:
             self.storage,
             self.settings,
             self.camera.latest_frame,
+            self.camera.recording_frames,
             self.camera.status,
             self._on_motion,
             lambda: self.detector.snapshot(),
@@ -227,7 +228,13 @@ STATE = AppState()
 class Handler(BaseHTTPRequestHandler):
     server_version = "PiWatch/0.1"
 
+    def do_HEAD(self):
+        self._head_only = True
+        return self.do_GET()
+
     def do_GET(self):
+        if not hasattr(self, "_head_only"):
+            self._head_only = False
         parsed = urlparse(self.path)
         path = parsed.path
         if path == "/":
@@ -355,6 +362,8 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(raw)))
         self.send_header("Cache-Control", "no-store")
         self.end_headers()
+        if getattr(self, "_head_only", False):
+            return
         self.wfile.write(raw)
 
     def file(self, path: Path, content_type: str):
@@ -366,6 +375,8 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(raw)))
         self.send_header("Cache-Control", "no-store")
         self.end_headers()
+        if getattr(self, "_head_only", False):
+            return
         self.wfile.write(raw)
 
     def raw(self, payload: bytes, content_type: str, status: HTTPStatus = HTTPStatus.OK):
@@ -374,6 +385,8 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(payload)))
         self.send_header("Cache-Control", "no-store")
         self.end_headers()
+        if getattr(self, "_head_only", False):
+            return
         self.wfile.write(payload)
 
     def video(self, recording_id: int):
@@ -381,7 +394,7 @@ class Handler(BaseHTTPRequestHandler):
         if not row:
             raise ValueError("recording_not_found")
         path = Path(row["file_path"])
-        if not path.exists() or path.suffix.lower() != ".mp4":
+        if not path.exists() or path.suffix.lower() not in {".mp4", ".mkv"}:
             raise ValueError("recording_file_not_found")
         size = path.stat().st_size
         start, end = 0, max(0, size - 1)
@@ -399,20 +412,25 @@ class Handler(BaseHTTPRequestHandler):
             status = HTTPStatus.PARTIAL_CONTENT
         length = end - start + 1
         self.send_response(status)
-        self.send_header("Content-Type", "video/mp4")
+        self.send_header("Content-Type", "video/x-matroska" if path.suffix.lower() == ".mkv" else "video/mp4")
         self.send_header("Content-Length", str(length))
         self.send_header("Accept-Ranges", "bytes")
         self.send_header("Cache-Control", "private, max-age=60")
         if status == HTTPStatus.PARTIAL_CONTENT:
             self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
         self.end_headers()
+        if getattr(self, "_head_only", False):
+            return
         with path.open("rb") as handle:
             handle.seek(start)
             remaining = length
             while remaining:
                 chunk = handle.read(min(1024 * 1024, remaining))
                 if not chunk: break
-                self.wfile.write(chunk)
+                try:
+                    self.wfile.write(chunk)
+                except (BrokenPipeError, ConnectionResetError):
+                    break
                 remaining -= len(chunk)
 
     def stream(self):

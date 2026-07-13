@@ -90,18 +90,32 @@ class Database:
             if reason not in reasons: reasons.append(reason)
             conn.execute("UPDATE recordings SET important=1,protected=1,important_reasons=? WHERE id=?",
                 (json.dumps(reasons, ensure_ascii=False), recording_id))
-    def add_recording_detection_mark(self, recording_id: int, offset_seconds: float, detections: list[dict[str, Any]]) -> None:
-        second = max(0, int(offset_seconds))
+    def add_recording_detection_mark(
+        self,
+        recording_id: int,
+        offset_seconds: float,
+        detections: list[dict[str, Any]],
+        frame_size: list[int] | tuple[int, int] | None = None,
+        allow_empty: bool = False,
+    ) -> None:
+        second = max(0, round(float(offset_seconds), 2))
         compact = [
             {
                 "label": str(item.get("label", "")),
                 "confidence": round(float(item.get("confidence", 0)), 3),
+                "box": [round(float(value), 1) for value in (item.get("box") or [])[:4]],
             }
             for item in detections
             if item.get("label")
         ]
-        if not compact:
+        if not compact and not allow_empty:
             return
+        mark_frame_size = [int(frame_size[0]), int(frame_size[1])] if frame_size and len(frame_size) == 2 else None
+        for item in detections:
+            size = item.get("frame_size")
+            if size and len(size) == 2:
+                mark_frame_size = [int(size[0]), int(size[1])]
+                break
         with self.connection() as conn:
             row = conn.execute("SELECT detection_marks FROM recordings WHERE id=?", (recording_id,)).fetchone()
             if not row:
@@ -109,9 +123,12 @@ class Database:
             try: marks = json.loads(row["detection_marks"] or "[]")
             except json.JSONDecodeError: marks = []
             for mark in marks:
-                if int(mark.get("second", -1)) == second:
+                if abs(float(mark.get("second", -1)) - second) < 0.05:
                     return
-            marks.append({"second": second, "detections": compact})
+            mark = {"second": second, "detections": compact}
+            if mark_frame_size:
+                mark["frame_size"] = mark_frame_size
+            marks.append(mark)
             conn.execute(
                 "UPDATE recordings SET detection_marks=? WHERE id=?",
                 (json.dumps(marks, ensure_ascii=False), recording_id),

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from queue import Full, Queue
 from shutil import which
 import subprocess
 import threading
@@ -20,6 +21,7 @@ class CameraManager:
         self._condition = threading.Condition()
         self._latest_frame: bytes | None = None
         self._frame_sequence = 0
+        self._recording_queue: Queue[bytes] = Queue(maxsize=600)
         self._last_error: str | None = None
         self._stopping = False
 
@@ -98,6 +100,12 @@ class CameraManager:
             if frame:
                 yield frame
 
+    def recording_frames(self) -> Iterator[bytes]:
+        self._ensure_preview()
+        while True:
+            frame = self._recording_queue.get(timeout=10)
+            yield frame
+
     def snapshot(self, timeout: float = 10) -> bytes:
         self._ensure_preview()
         with self._condition:
@@ -134,6 +142,7 @@ class CameraManager:
                 self._thread = None
                 self._latest_frame = None
                 self._frame_sequence = 0
+                self._recording_queue = Queue(maxsize=600)
                 self._last_error = None
                 self._condition.notify_all()
             self._stopping = False
@@ -204,6 +213,7 @@ class CameraManager:
                         break
                     frame = bytes(buffer[start : end + 2])
                     del buffer[: end + 2]
+                    self._publish_recording_frame(frame)
                     with self._condition:
                         self._latest_frame = frame
                         self._frame_sequence += 1
@@ -221,3 +231,16 @@ class CameraManager:
             with self._condition:
                 self._last_error = str(exc)
                 self._condition.notify_all()
+
+    def _publish_recording_frame(self, frame: bytes) -> None:
+        try:
+            self._recording_queue.put_nowait(frame)
+        except Full:
+            try:
+                self._recording_queue.get_nowait()
+            except Exception:
+                pass
+            try:
+                self._recording_queue.put_nowait(frame)
+            except Full:
+                pass

@@ -88,13 +88,15 @@ def test_recording_detection_marks_are_unique_per_second():
     with TemporaryDirectory() as tmp:
         db = Database(Path(tmp) / "test.db")
         recording_id = db.create_recording("csi", str(Path(tmp) / "clip.mp4"), False)
-        db.add_recording_detection_mark(recording_id, 12.4, [{"label": "person", "confidence": 0.81234}])
-        db.add_recording_detection_mark(recording_id, 12.8, [{"label": "person", "confidence": 0.9}])
-        db.add_recording_detection_mark(recording_id, 13.1, [{"label": "dog", "confidence": 0.71234}])
+        db.add_recording_detection_mark(recording_id, 12.4, [{"label": "person", "confidence": 0.81234, "box": [1, 2, 3, 4], "frame_size": [640, 480]}])
+        db.add_recording_detection_mark(recording_id, 12.4, [{"label": "person", "confidence": 0.9, "box": [2, 3, 4, 5]}])
+        db.add_recording_detection_mark(recording_id, 13.1, [{"label": "dog", "confidence": 0.71234, "box": [5, 6, 7, 8]}])
+        db.add_recording_detection_mark(recording_id, 13.8, [], [640, 480], allow_empty=True)
 
         assert db.get_recording(recording_id)["detection_marks"] == [
-            {"second": 12, "detections": [{"label": "person", "confidence": 0.812}]},
-            {"second": 13, "detections": [{"label": "dog", "confidence": 0.712}]},
+            {"second": 12.4, "detections": [{"label": "person", "confidence": 0.812, "box": [1.0, 2.0, 3.0, 4.0]}], "frame_size": [640, 480]},
+            {"second": 13.1, "detections": [{"label": "dog", "confidence": 0.712, "box": [5.0, 6.0, 7.0, 8.0]}]},
+            {"second": 13.8, "detections": [], "frame_size": [640, 480]},
         ]
 
 
@@ -103,15 +105,15 @@ def test_recording_detection_marks_are_throttled():
         db = Database(Path(tmp) / "test.db")
         storage = StorageManager(db)
         session = RecordingSession(db.create_recording("csi", str(Path(tmp) / "clip.mp4"), False), Path(tmp) / "clip.mp4", 100.0, "csi", False)
-        manager = RecordingManager(storage, lambda: {"recording": {}}, lambda: None, lambda: {}, lambda score: None)
+        manager = RecordingManager(storage, lambda: {"recording": {}}, lambda: None, None, lambda: {}, lambda score: None)
         manager._session = session
         detections = [{"label": "person", "confidence": 0.8}]
 
         manager._record_detection_mark(105.0, detections)
-        manager._record_detection_mark(109.0, detections)
-        manager._record_detection_mark(115.0, detections)
+        manager._record_detection_mark(105.2, detections)
+        manager._record_detection_mark(105.6, detections)
 
-        assert [mark["second"] for mark in db.get_recording(session.recording_id)["detection_marks"]] == [5, 15]
+        assert [mark["second"] for mark in db.get_recording(session.recording_id)["detection_marks"]] == [5.0, 5.6]
 
 
 def test_recording_filter_and_delete():

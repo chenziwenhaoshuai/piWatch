@@ -7,7 +7,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Iterator
 
 from .config import RECORDINGS_DIR
 from .database import Database
@@ -97,6 +97,7 @@ class RecordingManager:
         storage: StorageManager,
         settings_getter: Callable[[], dict[str, Any]],
         frame_getter: Callable[[], bytes | None],
+        frame_iterator: Callable[[], Iterator[bytes]] | None,
         camera_status_getter: Callable[[], dict[str, Any]],
         motion_callback: Callable[[float], None],
         detection_getter: Callable[[], dict[str, Any]] | None = None,
@@ -104,6 +105,7 @@ class RecordingManager:
         self.storage = storage
         self.settings_getter = settings_getter
         self.frame_getter = frame_getter
+        self.frame_iterator = frame_iterator
         self.camera_status_getter = camera_status_getter
         self.motion_callback = motion_callback
         self.detection_getter = detection_getter
@@ -135,6 +137,7 @@ class RecordingManager:
 
     def stop(self) -> None:
         self._stop.set()
+        self._close_segment("interrupted")
         if self._thread:
             self._thread.join(timeout=8)
         self._thread = None
@@ -162,6 +165,7 @@ class RecordingManager:
         previous_gray = None
         next_motion_at = 0.0
         next_frame_at = 0.0
+        frames = self.frame_iterator() if self.frame_iterator else None
         try:
             while not self._stop.is_set():
                 settings = self.settings_getter()
@@ -181,19 +185,24 @@ class RecordingManager:
                         time.sleep(2)
                         continue
                     next_frame_at = time.monotonic()
-                payload = self.frame_getter()
+                try:
+                    payload = next(frames) if frames else self.frame_getter()
+                except Exception as exc:
+                    self.last_error = f"recording_frame_unavailable:{exc}"
+                    time.sleep(0.2)
+                    frames = self.frame_iterator() if self.frame_iterator else None
+                    continue
                 if not payload or self._process is None or self._process.stdin is None:
                     time.sleep(0.05)
                     continue
                 now = time.monotonic()
-                if now < next_frame_at:
+                if not frames and now < next_frame_at:
                     time.sleep(min(0.01, next_frame_at - now))
                     continue
                 next_frame_at = now + 1 / fps
                 try:
-                    output_payload = self._annotate_frame(payload, now)
-                    self._process.stdin.write(output_payload)
-                    self._process.stdin.flush()
+                    self._record_detection_overlay(now)
+                    self._process.stdin.write(payload)
                 except (BrokenPipeError, OSError) as exc:
                     self.last_error = f"recording_encoder_failed:{exc}"
                     self._close_segment("failed")
@@ -225,18 +234,30 @@ class RecordingManager:
         session = self.storage.start_recording(str(camera.get("source_type", "csi")), False, storage_zone)
         if alert_active:
             self.storage.db.mark_recording_important(session.recording_id, "alert_schedule")
+        encoder = "h264_v4l2m2m" if self._ffmpeg_encoder_available(ffmpeg, "h264_v4l2m2m") else "libx264"
         command = [
             ffmpeg, "-hide_banner", "-loglevel", "error", "-y",
-            "-use_wallclock_as_timestamps", "1", "-f", "image2pipe", "-vcodec", "mjpeg", "-i", "-",
-            "-an", "-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency",
-            "-fps_mode", "vfr", "-pix_fmt", "yuv420p", "-movflags", "+faststart", str(session.file_path),
+            "-use_wallclock_as_timestamps", "1", "-f", "image2pipe", "-vcodec", "mjpeg", "-framerate", str(fps), "-i", "-",
+            "-an", "-c:v", encoder,
         ]
+        if encoder == "libx264":
+            command.extend(["-preset", "ultrafast", "-tune", "zerolatency"])
+        else:
+            command.extend(["-b:v", "4000k"])
+        command.extend(["-fps_mode", "vfr", "-pix_fmt", "yuv420p", "-movflags", "+faststart", str(session.file_path)])
         process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
         with self._lock:
             self._session = session
             self._process = process
             self._last_detection_mark_second = None
         self.last_error = None
+
+    def _ffmpeg_encoder_available(self, ffmpeg: str, encoder: str) -> bool:
+        try:
+            result = subprocess.run([ffmpeg, "-hide_banner", "-encoders"], text=True, capture_output=True, timeout=5)
+            return result.returncode == 0 and encoder in result.stdout
+        except Exception:
+            return False
 
     def _close_segment(self, status: str) -> RecordingSession | None:
         with self._lock:
@@ -297,53 +318,26 @@ class RecordingManager:
             self.last_error = f"motion_detection_failed:{exc}"
             return previous_gray
 
-    def _annotate_frame(self, payload: bytes, now: float) -> bytes:
+    def _record_detection_overlay(self, now: float) -> None:
         detection = self.detection_getter() if self.detection_getter else None
         if not detection:
-            return payload
-        detections = detection.get("last_detections") or []
+            return
         frame_size = detection.get("frame_size") or None
         updated_at = detection.get("updated_at")
-        if not detections or not frame_size or updated_at is None or time.time() - float(updated_at) > 2.0:
-            return payload
-        self._record_detection_mark(now, detections)
-        try:
-            import cv2
-            import numpy as np
-            frame = cv2.imdecode(np.frombuffer(payload, dtype="uint8"), cv2.IMREAD_COLOR)
-            if frame is None:
-                return payload
-            source_width, source_height = int(frame_size[0]), int(frame_size[1])
-            frame_height, frame_width = frame.shape[:2]
-            scale_x = frame_width / source_width if source_width else 1
-            scale_y = frame_height / source_height if source_height else 1
-            for item in detections:
-                box = item.get("box") or []
-                if len(box) != 4:
-                    continue
-                x1, y1, x2, y2 = [int(value) for value in box]
-                x1, x2 = sorted((max(0, min(frame_width - 1, int(x1 * scale_x))), max(0, min(frame_width - 1, int(x2 * scale_x)))))
-                y1, y2 = sorted((max(0, min(frame_height - 1, int(y1 * scale_y))), max(0, min(frame_height - 1, int(y2 * scale_y)))))
-                label = f"{item.get('label', 'object')} {float(item.get('confidence', 0)):.2f}"
-                cv2.rectangle(frame, (x1, y1), (x2, y2), (36, 209, 126), 2)
-                label_y = max(18, y1 - 6)
-                cv2.putText(frame, label, (x1, label_y), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (7, 16, 20), 3, cv2.LINE_AA)
-                cv2.putText(frame, label, (x1, label_y), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (36, 209, 126), 1, cv2.LINE_AA)
-            ok, encoded = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), 85])
-            return encoded.tobytes() if ok else payload
-        except Exception as exc:
-            self.last_error = f"recording_annotation_failed:{exc}"
-            return payload
+        if not frame_size or updated_at is None or time.time() - float(updated_at) > 2.0:
+            return
+        detections = detection.get("last_detections") or []
+        self._record_detection_mark(now, detections, frame_size)
 
-    def _record_detection_mark(self, now: float, detections: list[dict[str, Any]]) -> None:
+    def _record_detection_mark(self, now: float, detections: list[dict[str, Any]], frame_size: list[int] | tuple[int, int] | None = None) -> None:
         with self._lock:
             session = self._session
         if session is None:
             return
-        second = max(0, int(now - session.started_monotonic))
-        if self._last_detection_mark_second is not None and second - self._last_detection_mark_second < 10:
+        second = max(0.0, round(now - session.started_monotonic, 2))
+        if self._last_detection_mark_second is not None and second - self._last_detection_mark_second < 0.5:
             return
-        self.storage.db.add_recording_detection_mark(session.recording_id, second, detections)
+        self.storage.db.add_recording_detection_mark(session.recording_id, second, [dict(item) for item in detections], frame_size, allow_empty=True)
         self._last_detection_mark_second = second
 
 

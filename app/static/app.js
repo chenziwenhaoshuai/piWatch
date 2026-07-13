@@ -11,6 +11,7 @@ const RECORDINGS_PAGE_SIZE = 24;
 let saveTimer = null;
 let saveInProgress = false;
 let saveQueued = false;
+const recordingOverlayState = new WeakMap();
 
 const COCO_GROUPS = [
   ['人员', [['person', '人']]],
@@ -58,6 +59,16 @@ function formatTimestamp(seconds) {
 function formatDate(value) {
   if (!value) return '--';
   return new Date(value).toLocaleString('zh-CN', { hour12: false });
+}
+
+function escapeHtml(value) {
+  return String(value ?? '').replace(/[&<>"']/g, (char) => ({
+    '&': '&amp;',
+    '<': '&lt;',
+    '>': '&gt;',
+    '"': '&quot;',
+    "'": '&#39;',
+  }[char]));
 }
 
 function formatUptime(seconds) {
@@ -155,6 +166,64 @@ function renderDetections(yolo) {
     detectionContext.fillStyle = '#071014';
     detectionContext.fillText(label, x + 6, labelY + 16);
   });
+}
+
+function renderRecordingOverlay(video, canvas, marks) {
+  const context = canvas.getContext('2d');
+  const width = video.clientWidth;
+  const height = video.clientHeight;
+  if (!context || !width || !height) return;
+  if (canvas.width !== width || canvas.height !== height) {
+    canvas.width = width;
+    canvas.height = height;
+  }
+  context.clearRect(0, 0, width, height);
+  if (!marks.length || !Number.isFinite(video.duration)) return;
+  const current = Number(video.currentTime) || 0;
+  let active = null;
+  for (const mark of marks) {
+    if (Number(mark.second) <= current + 0.08) active = mark;
+    else break;
+  }
+  if (!active || current - Number(active.second) > 2.5) return;
+  const sourceWidth = Number(active.frame_size?.[0]) || video.videoWidth;
+  const sourceHeight = Number(active.frame_size?.[1]) || video.videoHeight;
+  if (!sourceWidth || !sourceHeight) return;
+  const scale = Math.min(width / sourceWidth, height / sourceHeight);
+  const offsetX = (width - sourceWidth * scale) / 2;
+  const offsetY = (height - sourceHeight * scale) / 2;
+  context.lineWidth = 2;
+  context.font = '600 12px "Segoe UI", sans-serif';
+  for (const detection of active.detections || []) {
+    const box = detection.box || [];
+    if (box.length !== 4) continue;
+    const [x1, y1, x2, y2] = box.map(Number);
+    const x = offsetX + x1 * scale;
+    const y = offsetY + y1 * scale;
+    const boxWidth = Math.max(1, (x2 - x1) * scale);
+    const boxHeight = Math.max(1, (y2 - y1) * scale);
+    const label = `${detection.label || 'object'} ${Number(detection.confidence || 0).toFixed(2)}`;
+    context.strokeStyle = '#24d17e';
+    context.fillStyle = 'rgba(7, 16, 20, 0.75)';
+    context.strokeRect(x, y, boxWidth, boxHeight);
+    const labelWidth = context.measureText(label).width + 10;
+    const labelY = Math.max(0, y - 20);
+    context.fillRect(x, labelY, labelWidth, 18);
+    context.fillStyle = '#24d17e';
+    context.fillText(label, x + 5, labelY + 13);
+  }
+}
+
+function attachRecordingOverlay(video, canvas, marks) {
+  const sorted = [...marks].sort((a, b) => Number(a.second) - Number(b.second));
+  const update = () => renderRecordingOverlay(video, canvas, sorted);
+  recordingOverlayState.set(video, { update });
+  ['loadedmetadata', 'play', 'pause', 'seeked', 'timeupdate'].forEach((event) => video.addEventListener(event, update));
+  video.addEventListener('ended', () => {
+    const context = canvas.getContext('2d');
+    if (context) context.clearRect(0, 0, canvas.width, canvas.height);
+  });
+  update();
 }
 
 function buildClassSelector() {
@@ -390,12 +459,16 @@ async function refreshRecordings() {
       const reasons = (item.important_reasons || []).map((reason) => reason === 'yolo' ? 'YOLO 目标' : reason === 'motion' ? '移动检测' : reason === 'alert_schedule' ? '警戒时段' : reason);
       const zone = item.storage_zone === 'alert' ? '警戒区' : '普通区';
       const marks = item.detection_marks || [];
-      const markHtml = marks.length ? `<div class="reason-list detection-marks">${marks.slice(0, 8).map((mark) => {
-        const labels = (mark.detections || []).map((detection) => `${detection.label} ${Number(detection.confidence || 0).toFixed(2)}`).join(', ');
+      const visibleMarks = marks.filter((mark) => (mark.detections || []).length);
+      const markHtml = visibleMarks.length ? `<div class="reason-list detection-marks">${visibleMarks.slice(0, 8).map((mark) => {
+        const labels = (mark.detections || []).map((detection) => `${escapeHtml(detection.label)} ${Number(detection.confidence || 0).toFixed(2)}`).join(', ');
         return `<span>${formatTimestamp(mark.second)} ${labels}</span>`;
-      }).join('')}${marks.length > 8 ? `<span>+${marks.length - 8}</span>` : ''}</div>` : '';
+      }).join('')}${visibleMarks.length > 8 ? `<span>+${visibleMarks.length - 8}</span>` : ''}</div>` : '';
       return `<article class="recording-item">
-        <video controls preload="metadata" src="/api/v1/recordings/${item.id}/video"></video>
+        <div class="recording-video-wrap" style="position:relative;background:#050708">
+          <video controls preload="metadata" src="/api/v1/recordings/${item.id}/video" data-recording-id="${item.id}"></video>
+          <canvas class="recording-overlay" data-recording-id="${item.id}" style="position:absolute;inset:0;width:100%;height:100%;pointer-events:none"></canvas>
+        </div>
         <div class="recording-meta">
           <div class="recording-title"><strong>${formatDate(item.started_at)}</strong>${item.important ? '<span class="important-badge">重点</span>' : ''}</div>
           <p>${zone} · ${formatDuration(item.duration_seconds)} · ${formatBytes(item.size_bytes)} · ${item.status === 'recording' ? '录制中' : '已完成'}</p>
@@ -405,9 +478,20 @@ async function refreshRecordings() {
         </div>
       </article>`;
     }).join('') : '<div class="empty-state">暂无录像</div>';
+    const marksById = new Map(items.map((item) => [String(item.id), item.detection_marks || []]));
+    document.querySelectorAll('#recording-list video[data-recording-id]').forEach((video) => {
+      const canvas = video.parentElement?.querySelector('canvas.recording-overlay');
+      if (canvas) attachRecordingOverlay(video, canvas, marksById.get(video.dataset.recordingId) || []);
+    });
   } catch (error) {
     $('#recording-list').innerHTML = `<div class="empty-state error-text">${error.message}</div>`;
   }
+}
+
+function hasActiveRecordingPlayback() {
+  return [...document.querySelectorAll('#recording-list video')].some((video) => {
+    return Number(video.currentTime) > 0 && !video.ended;
+  });
 }
 
 document.querySelectorAll('[data-recording-filter]').forEach((button) => {
@@ -429,7 +513,9 @@ $('#recording-next').onclick = () => {
 };
 
 refreshRecordings();
-setInterval(refreshRecordings, 15000);
+setInterval(() => {
+  if (!hasActiveRecordingPlayback()) refreshRecordings();
+}, 15000);
 
 $('#clear-recordings').onclick = async () => {
   const button = $('#clear-recordings');
@@ -448,7 +534,7 @@ $('#clear-recordings').onclick = async () => {
 };
 
 $('#recording-list').onclick = async (event) => {
-  const button = event.target.closest('[data-recording-id]');
+  const button = event.target.closest('.delete-recording[data-recording-id]');
   if (!button || !window.confirm('确定删除这个视频？此操作无法撤销。')) return;
   button.disabled = true;
   try {
