@@ -49,10 +49,18 @@ class StorageManager:
         recording_id = self.db.create_recording(camera_type, str(path), audio_enabled, storage_zone)
         return RecordingSession(recording_id, path, time.monotonic(), camera_type, audio_enabled)
 
-    def finish_recording(self, session: RecordingSession, status: str = "completed") -> None:
+    def finish_recording(self, session: RecordingSession, status: str = "completed") -> int:
         duration = max(0, time.monotonic() - session.started_monotonic)
         size = session.file_path.stat().st_size if session.file_path.exists() else 0
+        if size == 0 and status != "recording":
+            try:
+                if session.file_path.exists():
+                    session.file_path.unlink()
+            finally:
+                self.db.delete_recording(session.recording_id)
+            return 0
         self.db.finish_recording(session.recording_id, status, duration, size)
+        return size
 
     def enforce_limit(self, max_storage_gb: float) -> int:
         limit_bytes = max(0.1, float(max_storage_gb)) * 1024**3
@@ -118,6 +126,8 @@ class RecordingManager:
         self.motion_score = 0.0
         self.last_motion_at: float | None = None
         self._last_detection_mark_second: int | None = None
+        self._failure_count = 0
+        self._encoder: str | None = None
 
     @property
     def active(self) -> bool:
@@ -206,13 +216,15 @@ class RecordingManager:
                 except (BrokenPipeError, OSError) as exc:
                     self.last_error = f"recording_encoder_failed:{exc}"
                     self._close_segment("failed")
-                    time.sleep(1)
+                    self._failure_count += 1
+                    time.sleep(min(60, 2 ** min(self._failure_count, 6)))
                     continue
                 if now >= next_motion_at:
                     next_motion_at = now + 0.5
                     previous_gray = self._check_motion(payload, previous_gray, settings.get("motion", {}))
                 if self._session and now - self._session.started_monotonic >= segment_seconds:
                     completed = self._close_segment("completed")
+                    self._failure_count = 0
                     self._discard_unimportant(recording, completed)
                     self.storage.enforce_limit(float(recording.get("max_storage_gb", 64)))
         except Exception as exc:
@@ -234,7 +246,9 @@ class RecordingManager:
         session = self.storage.start_recording(str(camera.get("source_type", "csi")), False, storage_zone)
         if alert_active:
             self.storage.db.mark_recording_important(session.recording_id, "alert_schedule")
-        encoder = "h264_v4l2m2m" if self._ffmpeg_encoder_available(ffmpeg, "h264_v4l2m2m") else "libx264"
+        if self._encoder is None:
+            self._encoder = "h264_v4l2m2m" if self._ffmpeg_encoder_available(ffmpeg, "h264_v4l2m2m") else "libx264"
+        encoder = self._encoder
         command = [
             ffmpeg, "-hide_banner", "-loglevel", "error", "-y",
             "-use_wallclock_as_timestamps", "1", "-f", "image2pipe", "-vcodec", "mjpeg", "-framerate", str(fps), "-i", "-",

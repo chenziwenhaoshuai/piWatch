@@ -137,6 +137,13 @@ class Database:
         with self.connection() as conn:
             conn.execute("DELETE FROM events WHERE recording_id=?", (recording_id,))
             conn.execute("DELETE FROM recordings WHERE id=?", (recording_id,))
+    def delete_recordings_by_ids(self, recording_ids: list[int]) -> None:
+        if not recording_ids:
+            return
+        placeholders = ",".join("?" for _ in recording_ids)
+        with self.connection() as conn:
+            conn.execute(f"DELETE FROM events WHERE recording_id IN ({placeholders})", recording_ids)
+            conn.execute(f"DELETE FROM recordings WHERE id IN ({placeholders})", recording_ids)
     def clear_recordings(self) -> int:
         with self.connection() as conn:
             row = conn.execute("SELECT COUNT(*) AS count FROM recordings").fetchone()
@@ -157,6 +164,8 @@ class Database:
         if zone in {"regular", "alert"}:
             filters.append("storage_zone=?")
             values.append(zone)
+        filters.append("status IN ('completed','recording')")
+        filters.append("size_bytes>0 OR status='recording'")
         return (" WHERE " + " AND ".join(filters)) if filters else "", values
     def count_recordings(self, important_only: bool = False, zone: str = "") -> int:
         where, values = self._recording_filters(important_only, zone)
