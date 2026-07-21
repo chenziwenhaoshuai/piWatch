@@ -444,7 +444,7 @@ async function refreshRecordings() {
     const query = `?${params.toString()}`;
     const data = await api(`/api/v1/recordings${query}`);
     const items = data.items || [];
-    const filterNames = { all: '全部', regular: '普通区', alert: '警戒区', important: '重点' };
+    const filterNames = { all: '全部', regular: '常规存储', alert: '警戒存储', important: '重点' };
     const total = Number(data.total) || 0;
     const pageCount = Math.max(1, Math.ceil(total / RECORDINGS_PAGE_SIZE));
     if (recordingPage >= pageCount) {
@@ -457,7 +457,7 @@ async function refreshRecordings() {
     $('#recording-next').disabled = recordingPage >= pageCount - 1;
     $('#recording-list').innerHTML = items.length ? items.map((item) => {
       const reasons = (item.important_reasons || []).map((reason) => reason === 'yolo' ? 'YOLO 目标' : reason === 'motion' ? '移动检测' : reason === 'alert_schedule' ? '警戒时段' : reason);
-      const zone = item.storage_zone === 'alert' ? '警戒区' : '普通区';
+      const zone = item.storage_zone === 'alert' ? '警戒存储' : '常规存储';
       const marks = item.detection_marks || [];
       const visibleMarks = marks.filter((mark) => (mark.detections || []).length);
       const markHtml = visibleMarks.length ? `<div class="reason-list detection-marks">${visibleMarks.slice(0, 8).map((mark) => {

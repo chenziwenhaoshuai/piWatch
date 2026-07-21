@@ -176,6 +176,8 @@ class AppState:
             "width": camera.get("width", 1280),
             "height": camera.get("height", 720),
             "fps": camera.get("fps", 15),
+            "source_width": camera.get("width", 1280),
+            "source_height": camera.get("height", 720),
         }
 
     def _on_detection(self, detections: list[Detection], should_notify: bool = True) -> None:

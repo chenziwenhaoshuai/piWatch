@@ -29,14 +29,14 @@ def fan_speed(temp_c: float) -> float:
     A small hysteresis-free curve is intentional here: it is simple, predictable,
     and updates slowly enough to avoid distracting speed changes.
     """
-    if temp_c < 45:
+    if temp_c < 40:
         return 0.0
-    if temp_c < 55:
-        return 0.35
+    if temp_c < 50:
+        return 0.45
+    if temp_c < 60:
+        return 0.70
     if temp_c < 65:
-        return 0.65
-    if temp_c < 70:
-        return 0.85
+        return 0.90
     return 1.0
 
 

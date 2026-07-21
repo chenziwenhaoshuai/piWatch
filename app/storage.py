@@ -126,6 +126,7 @@ class RecordingManager:
         self.motion_score = 0.0
         self.last_motion_at: float | None = None
         self._last_detection_mark_second: int | None = None
+        self._pending_important_reasons: set[str] = set()
         self._failure_count = 0
         self._encoder: str | None = None
 
@@ -153,7 +154,10 @@ class RecordingManager:
         self._thread = None
 
     def mark_important(self, reason: str) -> int | None:
-        recording_id = self.current_recording_id
+        with self._lock:
+            recording_id = self._session.recording_id if self._session else None
+            if recording_id is None:
+                self._pending_important_reasons.add(reason)
         if recording_id is not None:
             self.storage.db.mark_recording_important(recording_id, reason)
         return recording_id
@@ -264,6 +268,10 @@ class RecordingManager:
             self._session = session
             self._process = process
             self._last_detection_mark_second = None
+            pending_important_reasons = sorted(self._pending_important_reasons)
+            self._pending_important_reasons.clear()
+        for reason in pending_important_reasons:
+            self.storage.db.mark_recording_important(session.recording_id, reason)
         self.last_error = None
 
     def _ffmpeg_encoder_available(self, ffmpeg: str, encoder: str) -> bool:

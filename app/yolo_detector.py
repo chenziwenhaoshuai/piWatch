@@ -4,6 +4,7 @@ import threading
 import time
 import importlib.util
 import traceback
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
@@ -33,6 +34,7 @@ class YoloDetector:
         if self.model is not None:
             return
         try:
+            self._configure_ncnn_factory()
             from ultralytics import YOLO
 
             self.model = YOLO(self.config.get("model_path", "yolo26n.pt"), task="detect")
@@ -43,11 +45,37 @@ class YoloDetector:
             self.error = str(exc)
             raise
 
+    @staticmethod
+    def _configure_ncnn_factory() -> None:
+        """Set NCNN worker count before layers are created at model load time."""
+        if getattr(YoloDetector, "_ncnn_configured", False):
+            return
+        try:
+            import ncnn
+
+            native_net = ncnn.Net
+            threads = max(1, min(4, int(os.getenv("PIWATCH_NCNN_THREADS", "3"))))
+
+            def create_net():
+                net = native_net()
+                net.opt.num_threads = threads
+                return net
+
+            ncnn.Net = create_net
+            YoloDetector._ncnn_configured = True
+        except (ImportError, AttributeError, TypeError, ValueError):
+            # This is an optional adjustment for the NCNN backend only.
+            return
+
     def detect(self, frame: Any, config: dict[str, Any] | None = None) -> list[Detection]:
         if config is not None:
             self.config = config
         self.load()
         height, width = frame.shape[:2]
+        source_width = max(1, int(self.config.get("source_width", width)))
+        source_height = max(1, int(self.config.get("source_height", height)))
+        scale_x = source_width / width
+        scale_y = source_height / height
         roi = normalize_roi(self.config.get("roi"), width, height)
         x1, y1, x2, y2 = roi
         crop = frame[y1:y2, x1:x2]
@@ -72,7 +100,18 @@ class YoloDetector:
                 if targets and label.lower() not in targets and str(class_id) not in targets:
                     continue
                 coords = [int(value) for value in box.xyxy[0].tolist()]
-                detections.append(Detection(label, confidence, (coords[0] + x1, coords[1] + y1, coords[2] + x1, coords[3] + y1)))
+                detections.append(
+                    Detection(
+                        label,
+                        confidence,
+                        (
+                            round((coords[0] + x1) * scale_x),
+                            round((coords[1] + y1) * scale_y),
+                            round((coords[2] + x1) * scale_x),
+                            round((coords[3] + y1) * scale_y),
+                        ),
+                    )
+                )
         return detections
 
 
@@ -89,6 +128,21 @@ def normalize_roi(value: Any, width: int, height: int) -> tuple[int, int, int, i
     x2 = min(width, max(x1 + 1, int((x + w) * width)))
     y2 = min(height, max(y1 + 1, int((y + h) * height)))
     return x1, y1, x2, y2
+
+
+def jpeg_decode_flag(config: dict[str, Any], cv2: Any) -> int:
+    """Decode only the detail the selected detector input can use.
+
+    CSI preview and recording keep their original MJPEG frame.  This only
+    applies JPEG DCT downscaling to the detector's private copy.
+    """
+    source_width = max(1, int(config.get("width", 1280)))
+    imgsz = max(32, int(config.get("imgsz", 640)))
+    if source_width // 4 >= imgsz:
+        return cv2.IMREAD_REDUCED_COLOR_4
+    if source_width // 2 >= imgsz:
+        return cv2.IMREAD_REDUCED_COLOR_2
+    return cv2.IMREAD_COLOR
 
 
 class ConsecutiveDetectionGate:
@@ -203,7 +257,8 @@ class DetectionWorker:
                     detectors[model_path] = detector
                 if config.get("source_type", "usb") == "csi":
                     payload = self.frame_getter() if self.frame_getter else None
-                    frame = cv2.imdecode(__import__("numpy").frombuffer(payload, dtype="uint8"), cv2.IMREAD_COLOR) if payload else None
+                    decode_flag = jpeg_decode_flag(config, cv2)
+                    frame = cv2.imdecode(__import__("numpy").frombuffer(payload, dtype="uint8"), decode_flag) if payload else None
                     ok = frame is not None
                 else:
                     capture = cv2.VideoCapture(config.get("device", "/dev/video0"))
@@ -222,7 +277,12 @@ class DetectionWorker:
                     if self._last_completed_at is not None and completed_at > self._last_completed_at:
                         self.actual_fps = round(1 / (completed_at - self._last_completed_at), 2)
                     self._last_completed_at = completed_at
-                    self.last_frame_size = (int(frame.shape[1]), int(frame.shape[0]))
+                    # Detection boxes are mapped back to the camera's original
+                    # coordinate system before publication.
+                    self.last_frame_size = (
+                        max(1, int(config.get("source_width", frame.shape[1]))),
+                        max(1, int(config.get("source_height", frame.shape[0]))),
+                    )
                     self.last_updated_at = time.time()
                     self.last_error = None
                     self.last_detections = detections
