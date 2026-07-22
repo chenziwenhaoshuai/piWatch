@@ -1,6 +1,7 @@
 ﻿from __future__ import annotations
 import json
 import sqlite3
+import threading
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -11,19 +12,28 @@ def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 class Database:
+    _connection_lock = threading.RLock()
+
     def __init__(self, path: Path = DB_PATH):
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.initialize()
     @contextmanager
     def connection(self):
-        conn = sqlite3.connect(self.path)
-        conn.row_factory = sqlite3.Row
-        try:
-            yield conn
-            conn.commit()
-        finally:
-            conn.close()
+        # The app has recorder, detector, email and HTTP threads all touching
+        # one database. WAL plus a short serialized transaction avoids lock
+        # errors from terminating a worker during normal operation.
+        with self._connection_lock:
+            conn = sqlite3.connect(self.path, timeout=10)
+            conn.row_factory = sqlite3.Row
+            conn.execute("PRAGMA busy_timeout=10000")
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA synchronous=NORMAL")
+            try:
+                yield conn
+                conn.commit()
+            finally:
+                conn.close()
     def initialize(self) -> None:
         with self.connection() as conn:
             conn.executescript("""
@@ -96,8 +106,7 @@ class Database:
         offset_seconds: float,
         detections: list[dict[str, Any]],
         frame_size: list[int] | tuple[int, int] | None = None,
-        allow_empty: bool = False,
-    ) -> None:
+    ) -> bool:
         second = max(0, round(float(offset_seconds), 2))
         compact = [
             {
@@ -108,8 +117,8 @@ class Database:
             for item in detections
             if item.get("label")
         ]
-        if not compact and not allow_empty:
-            return
+        if not compact:
+            return False
         mark_frame_size = [int(frame_size[0]), int(frame_size[1])] if frame_size and len(frame_size) == 2 else None
         for item in detections:
             size = item.get("frame_size")
@@ -119,12 +128,11 @@ class Database:
         with self.connection() as conn:
             row = conn.execute("SELECT detection_marks FROM recordings WHERE id=?", (recording_id,)).fetchone()
             if not row:
-                return
+                return False
             try: marks = json.loads(row["detection_marks"] or "[]")
             except json.JSONDecodeError: marks = []
-            for mark in marks:
-                if abs(float(mark.get("second", -1)) - second) < 0.05:
-                    return
+            if len(marks) >= 60:
+                return False
             mark = {"second": second, "detections": compact}
             if mark_frame_size:
                 mark["frame_size"] = mark_frame_size
@@ -133,6 +141,7 @@ class Database:
                 "UPDATE recordings SET detection_marks=? WHERE id=?",
                 (json.dumps(marks, ensure_ascii=False), recording_id),
             )
+            return True
     def delete_recording(self, recording_id: int) -> None:
         with self.connection() as conn:
             conn.execute("DELETE FROM events WHERE recording_id=?", (recording_id,))
@@ -156,7 +165,7 @@ class Database:
             cur = conn.execute("INSERT INTO events(type,started_at,recording_id,details,created_at) VALUES(?,?,?,?,?)",
                 (event_type, utc_now(), recording_id, json.dumps(details or {}, ensure_ascii=False), utc_now()))
             return int(cur.lastrowid)
-    def _recording_filters(self, important_only: bool = False, zone: str = "") -> tuple[str, list[Any]]:
+    def _recording_filters(self, important_only: bool = False, zone: str = "", recording_date: str = "") -> tuple[str, list[Any]]:
         filters = []
         values: list[Any] = []
         if important_only:
@@ -164,17 +173,20 @@ class Database:
         if zone in {"regular", "alert"}:
             filters.append("storage_zone=?")
             values.append(zone)
-        filters.append("status IN ('completed','recording')")
-        filters.append("size_bytes>0 OR status='recording'")
+        if recording_date:
+            filters.append("file_path LIKE ?")
+            values.append(f"%/{recording_date.replace('-', '/')}/%")
+        filters.append("status='completed'")
+        filters.append("size_bytes>0")
         return (" WHERE " + " AND ".join(filters)) if filters else "", values
-    def count_recordings(self, important_only: bool = False, zone: str = "") -> int:
-        where, values = self._recording_filters(important_only, zone)
+    def count_recordings(self, important_only: bool = False, zone: str = "", recording_date: str = "") -> int:
+        where, values = self._recording_filters(important_only, zone, recording_date)
         with self.connection() as conn:
             row = conn.execute(f"SELECT COUNT(*) AS count FROM recordings{where}", values).fetchone()
         return int(row["count"] if row else 0)
-    def list_recordings(self, limit: int = 50, important_only: bool = False, offset: int = 0, zone: str = "") -> list[dict[str, Any]]:
+    def list_recordings(self, limit: int = 50, important_only: bool = False, offset: int = 0, zone: str = "", recording_date: str = "") -> list[dict[str, Any]]:
         query = "SELECT * FROM recordings"
-        where, values = self._recording_filters(important_only, zone)
+        where, values = self._recording_filters(important_only, zone, recording_date)
         query += where
         query += " ORDER BY id DESC LIMIT ? OFFSET ?"
         values.extend((max(1, int(limit)), max(0, int(offset))))
@@ -192,6 +204,10 @@ class Database:
         except json.JSONDecodeError: result["important_reasons"] = []
         try: result["detection_marks"] = json.loads(result.get("detection_marks") or "[]")
         except json.JSONDecodeError: result["detection_marks"] = []
+        marks = result["detection_marks"]
+        if len(marks) > 60:
+            step = max(1, (len(marks) + 59) // 60)
+            result["detection_marks"] = marks[::step]
         result["important"] = bool(result.get("important"))
         result["protected"] = bool(result.get("protected"))
         return result

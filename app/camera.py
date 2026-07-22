@@ -184,7 +184,7 @@ class CameraManager:
                         "-",
                     ],
                     stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL,
                 )
                 self._thread = threading.Thread(target=self._read_frames, name="piwatch-camera", daemon=True)
                 self._thread.start()
@@ -220,10 +220,6 @@ class CameraManager:
                         self._condition.notify_all()
             if not self._stopping:
                 error = "camera_process_exited"
-                if process.stderr:
-                    detail = process.stderr.read().decode("utf-8", errors="replace").strip()
-                    if detail:
-                        error = detail[-1000:]
                 with self._condition:
                     self._last_error = error
                     self._condition.notify_all()

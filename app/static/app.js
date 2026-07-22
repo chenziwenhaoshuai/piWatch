@@ -6,6 +6,7 @@ const detectionContext = detectionCanvas.getContext('2d');
 let settingsLoaded = false;
 let lastDetectionUpdate = null;
 let recordingFilter = 'all';
+let recordingDate = '';
 let recordingPage = 0;
 const RECORDINGS_PAGE_SIZE = 24;
 let saveTimer = null;
@@ -441,6 +442,7 @@ async function refreshRecordings() {
     });
     if (recordingFilter === 'important') params.set('important', '1');
     if (recordingFilter === 'regular' || recordingFilter === 'alert') params.set('zone', recordingFilter);
+    if (recordingDate) params.set('date', recordingDate);
     const query = `?${params.toString()}`;
     const data = await api(`/api/v1/recordings${query}`);
     const items = data.items || [];
@@ -455,7 +457,13 @@ async function refreshRecordings() {
     $('#recording-page').textContent = total ? `第 ${recordingPage + 1} / ${pageCount} 页` : '暂无录像';
     $('#recording-prev').disabled = recordingPage <= 0;
     $('#recording-next').disabled = recordingPage >= pageCount - 1;
+    let renderedRecordingDate = '';
     $('#recording-list').innerHTML = items.length ? items.map((item) => {
+      const match = String(item.file_path || '').match(/\/(\d{4})\/(\d{2})\/(\d{2})\//);
+      const recordingDate = match ? `${match[1]}-${match[2]}-${match[3]}` : String(item.started_at || '').slice(0, 10);
+      const dateHeading = recordingDate && recordingDate !== renderedRecordingDate
+        ? `<div class="recording-date-header"><span>${recordingDate}</span></div>` : '';
+      renderedRecordingDate = recordingDate;
       const reasons = (item.important_reasons || []).map((reason) => reason === 'yolo' ? 'YOLO 目标' : reason === 'motion' ? '移动检测' : reason === 'alert_schedule' ? '警戒时段' : reason);
       const zone = item.storage_zone === 'alert' ? '警戒存储' : '常规存储';
       const marks = item.detection_marks || [];
@@ -464,7 +472,7 @@ async function refreshRecordings() {
         const labels = (mark.detections || []).map((detection) => `${escapeHtml(detection.label)} ${Number(detection.confidence || 0).toFixed(2)}`).join(', ');
         return `<span>${formatTimestamp(mark.second)} ${labels}</span>`;
       }).join('')}${visibleMarks.length > 8 ? `<span>+${visibleMarks.length - 8}</span>` : ''}</div>` : '';
-      return `<article class="recording-item">
+      return `${dateHeading}<article class="recording-item">
         <div class="recording-video-wrap" style="position:relative;background:#050708">
           <video controls preload="metadata" src="/api/v1/recordings/${item.id}/video" data-recording-id="${item.id}"></video>
           <canvas class="recording-overlay" data-recording-id="${item.id}" style="position:absolute;inset:0;width:100%;height:100%;pointer-events:none"></canvas>
@@ -502,6 +510,24 @@ document.querySelectorAll('[data-recording-filter]').forEach((button) => {
     refreshRecordings();
   };
 });
+
+const recordingDateFilter = document.createElement('div');
+recordingDateFilter.className = 'recording-date-filter';
+recordingDateFilter.innerHTML = '<input id="recording-date" type="date" aria-label="Filter recordings by date"><button type="button" id="clear-recording-date" title="Clear date filter">x</button>';
+document.querySelector('.view-tabs').append(recordingDateFilter);
+const recordingDateInput = $('#recording-date');
+recordingDateInput.onchange = () => {
+  recordingDate = recordingDateInput.value;
+  recordingPage = 0;
+  refreshRecordings();
+};
+$('#clear-recording-date').onclick = () => {
+  if (!recordingDateInput.value) return;
+  recordingDateInput.value = '';
+  recordingDate = '';
+  recordingPage = 0;
+  refreshRecordings();
+};
 
 $('#recording-prev').onclick = () => {
   recordingPage = Math.max(0, recordingPage - 1);

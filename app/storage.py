@@ -25,6 +25,8 @@ class RecordingSession:
 class StorageManager:
     def __init__(self, db: Database):
         self.db = db
+        self._recording_bytes_cache = 0
+        self._recording_bytes_checked_at = 0.0
 
     def disk_status(self) -> dict[str, Any]:
         usage = shutil.disk_usage(RECORDINGS_DIR)
@@ -39,7 +41,12 @@ class StorageManager:
         }
 
     def recording_bytes(self) -> int:
-        return sum(path.stat().st_size for path in RECORDINGS_DIR.rglob("*.mp4") if path.is_file())
+        now = time.monotonic()
+        if now - self._recording_bytes_checked_at < 30:
+            return self._recording_bytes_cache
+        self._recording_bytes_cache = sum(path.stat().st_size for path in RECORDINGS_DIR.rglob("*.mp4") if path.is_file())
+        self._recording_bytes_checked_at = now
+        return self._recording_bytes_cache
 
     def start_recording(self, camera_type: str, audio_enabled: bool, storage_zone: str = "regular") -> RecordingSession:
         now = datetime.now()
@@ -60,6 +67,7 @@ class StorageManager:
                 self.db.delete_recording(session.recording_id)
             return 0
         self.db.finish_recording(session.recording_id, status, duration, size)
+        self._recording_bytes_checked_at = 0.0
         return size
 
     def enforce_limit(self, max_storage_gb: float) -> int:
@@ -79,6 +87,7 @@ class StorageManager:
                 if path.exists():
                     path.unlink()
                 self.db.delete_recording(int(row["id"]))
+                self._recording_bytes_checked_at = 0.0
                 deleted += 1
             except OSError:
                 break
@@ -96,6 +105,7 @@ class StorageManager:
             except OSError:
                 continue
         self.db.clear_recordings()
+        self._recording_bytes_checked_at = 0.0
         return deleted_files
 
 
@@ -263,7 +273,7 @@ class RecordingManager:
         else:
             command.extend(["-b:v", "4000k"])
         command.extend(["-fps_mode", "vfr", "-pix_fmt", "yuv420p", "-movflags", "+faststart", str(session.file_path)])
-        process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         with self._lock:
             self._session = session
             self._process = process
@@ -357,10 +367,12 @@ class RecordingManager:
         if session is None:
             return
         second = max(0.0, round(now - session.started_monotonic, 2))
-        if self._last_detection_mark_second is not None and second - self._last_detection_mark_second < 0.5:
+        if not detections:
             return
-        self.storage.db.add_recording_detection_mark(session.recording_id, second, [dict(item) for item in detections], frame_size, allow_empty=True)
-        self._last_detection_mark_second = second
+        if self._last_detection_mark_second is not None and second - self._last_detection_mark_second < 5.0:
+            return
+        if self.storage.db.add_recording_detection_mark(session.recording_id, second, [dict(item) for item in detections], frame_size):
+            self._last_detection_mark_second = second
 
 
 def changed_percent(previous: Any, current: Any, pixel_threshold: int, cv2: Any) -> float:

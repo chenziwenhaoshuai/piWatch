@@ -471,11 +471,14 @@ def validate_time(value: Any) -> str:
 def paged_recordings(query: dict[str, list[str]]) -> dict[str, Any]:
     important_only = query.get("important", ["0"])[0] == "1"
     zone = query.get("zone", [""])[0]
+    recording_date = query.get("date", [""])[0]
+    if recording_date and (len(recording_date) != 10 or recording_date[4] != "-" or recording_date[7] != "-" or not recording_date.replace("-", "").isdigit()):
+        recording_date = ""
     limit = max(1, min(100, int(query.get("limit", ["24"])[0])))
     offset = max(0, int(query.get("offset", ["0"])[0]))
-    total = STATE.db.count_recordings(important_only, zone)
+    total = STATE.db.count_recordings(important_only, zone, recording_date)
     return {
-        "items": STATE.db.list_recordings(limit, important_only, offset, zone),
+        "items": STATE.db.list_recordings(limit, important_only, offset, zone, recording_date),
         "total": total,
         "limit": limit,
         "offset": offset,
